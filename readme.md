@@ -35,6 +35,9 @@ cd car_rl_project
 **Windows:**
 ```bash
 python -m venv .venv
+```
+
+```bash
 .venv\Scripts\activate
 ```
 
