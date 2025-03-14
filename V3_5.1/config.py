@@ -110,7 +110,7 @@ def detect_hardware_capabilities():
                 return {
                     'batch_size': 2048,
                     'memory_size': 100000,
-                    'max_speed': .10,
+                    'max_speed': 5.0,
                     'learning_rate': 3e-4,
                     'ppo_epochs': 10,
                     'save_interval': 50,
