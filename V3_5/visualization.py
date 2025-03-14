@@ -559,26 +559,45 @@ def combined_rendering_thread():
 
                                 critic_loss_history = critic_loss_history[::downsample_factor]
 
-                            # Draw total loss plot
+                            # Position the legend items at different horizontal positions to avoid overlap
+
+                            legend_spacing = section['rect'].width // 4
+
+                            legend_y = section['rect'].y + 5  # Fixed Y position for all legends
+
+                            # Draw total loss plot with empty label (we'll add the legend separately)
 
                             if loss_history:
-                                draw_line_plot(combined_screen, plot_rect, loss_history,
+                                draw_line_plot(combined_screen, plot_rect, loss_history, color=YELLOW, label="")
 
-                                               color=YELLOW, label="Total Loss")
+                                # Add total loss legend at left position
 
-                            # Draw actor loss plot
+                                loss_label = small_font.render("Total Loss", True, YELLOW)
+
+                                combined_screen.blit(loss_label, (section['rect'].x + 10, legend_y))
+
+                            # Draw actor loss plot with empty label
 
                             if actor_loss_history:
-                                draw_line_plot(combined_screen, plot_rect, actor_loss_history,
+                                draw_line_plot(combined_screen, plot_rect, actor_loss_history, color=RED, label="")
 
-                                               color=RED, label="Actor Loss")
+                                # Add actor loss legend at middle position
 
-                            # Draw critic loss plot
+                                actor_label = small_font.render("Actor Loss", True, RED)
+
+                                combined_screen.blit(actor_label, (section['rect'].x + 10 + legend_spacing, legend_y))
+
+                            # Draw critic loss plot with empty label
 
                             if critic_loss_history:
-                                draw_line_plot(combined_screen, plot_rect, critic_loss_history,
+                                draw_line_plot(combined_screen, plot_rect, critic_loss_history, color=BLUE, label="")
 
-                                               color=BLUE, label="Critic Loss")
+                                # Add critic loss legend at right position
+
+                                critic_label = small_font.render("Critic Loss", True, BLUE)
+
+                                combined_screen.blit(critic_label,
+                                                     (section['rect'].x + 10 + 2 * legend_spacing, legend_y))
 
                         else:
 
@@ -617,7 +636,6 @@ def combined_rendering_thread():
                                 upper_rect = pygame.Rect(plot_rect.left, plot_rect.top, plot_rect.width, half_height)
 
                                 lower_rect = pygame.Rect(plot_rect.left, plot_rect.top + half_height, plot_rect.width,
-
                                                          half_height)
 
                                 # Fill background with slight color to distinguish areas
@@ -644,9 +662,11 @@ def combined_rendering_thread():
 
                                                  (lower_rect.right, zero_y_steer), 1)
 
-                                # Add labels
+                                # Add labels with better positioning
 
                                 label_font = pygame.font.SysFont('Arial', 12)
+
+                                # Main labels positioned at top left
 
                                 accel_label = label_font.render("Acceleration (Fwd/Rev)", True, CYAN)
 
@@ -662,7 +682,6 @@ def combined_rendering_thread():
 
                                 for i, accel in enumerate(accel_actions):
                                     x = upper_rect.left + (i / (
-
                                         len(accel_actions) - 1 if len(accel_actions) > 1 else 1)) * upper_rect.width
 
                                     # Map -1 to 1 range to the upper rect height
@@ -680,7 +699,6 @@ def combined_rendering_thread():
 
                                 for i, steer in enumerate(steer_actions):
                                     x = lower_rect.left + (i / (
-
                                         len(steer_actions) - 1 if len(steer_actions) > 1 else 1)) * lower_rect.width
 
                                     # Map -1 to 1 range to the lower rect height
@@ -696,7 +714,6 @@ def combined_rendering_thread():
 
                                 if accel_points:
                                     pygame.draw.circle(combined_screen, CYAN,
-
                                                        (int(accel_points[-1][0]), int(accel_points[-1][1])), 4)
 
                                     last_accel = accel_actions[-1]
@@ -704,12 +721,10 @@ def combined_rendering_thread():
                                     last_accel_label = label_font.render(f"{last_accel:.2f}", True, CYAN)
 
                                     combined_screen.blit(last_accel_label,
-
                                                          (accel_points[-1][0] + 5, accel_points[-1][1] - 10))
 
                                 if steer_points:
                                     pygame.draw.circle(combined_screen, PURPLE,
-
                                                        (int(steer_points[-1][0]), int(steer_points[-1][1])), 4)
 
                                     last_steer = steer_actions[-1]
@@ -717,12 +732,13 @@ def combined_rendering_thread():
                                     last_steer_label = label_font.render(f"{last_steer:.2f}", True, PURPLE)
 
                                     combined_screen.blit(last_steer_label,
-
                                                          (steer_points[-1][0] + 5, steer_points[-1][1] - 10))
 
-                                # Add explanatory legends
+                                # Add explanatory legends with better positioning
 
                                 small_font = pygame.font.SysFont('Arial', 10)
+
+                                # Position "Forward" at top right, "Reverse" at bottom right (FIXED POSITIONING)
 
                                 accel_pos = small_font.render("Forward", True, LIGHT_GRAY)
 
@@ -732,15 +748,19 @@ def combined_rendering_thread():
 
                                 steer_neg = small_font.render("Left", True, LIGHT_GRAY)
 
-                                # Position the legends
+                                # Position the legends at corners to avoid overlap
 
-                                combined_screen.blit(accel_pos, (upper_rect.left + 5, upper_rect.top + 5))
+                                combined_screen.blit(accel_pos,
+                                                     (upper_rect.right - accel_pos.get_width() - 5, upper_rect.top + 5))
 
-                                combined_screen.blit(accel_neg, (upper_rect.left + 5, zero_y_accel + 5))
+                                combined_screen.blit(accel_neg,
+                                                     (upper_rect.right - accel_neg.get_width() - 5, zero_y_accel + 5))
 
-                                combined_screen.blit(steer_pos, (lower_rect.left + 5, lower_rect.top + 5))
+                                combined_screen.blit(steer_pos,
+                                                     (lower_rect.right - steer_pos.get_width() - 5, lower_rect.top + 5))
 
-                                combined_screen.blit(steer_neg, (lower_rect.left + 5, zero_y_steer + 5))
+                                combined_screen.blit(steer_neg,
+                                                     (lower_rect.right - steer_neg.get_width() - 5, zero_y_steer + 5))
 
                         else:
 
@@ -777,170 +797,297 @@ def combined_rendering_thread():
                                            min_val=min_val, max_val=max_val,
                                            color=CYAN, label="100-Episode Moving Avg")
 
+
+
                     elif section_id == 'sensor_plot':
+
                         # Improved sensor readings visualization
+
                         if car and hasattr(car, 'sensor_readings'):
+
                             sensor_readings = car.sensor_readings
 
-                            # Use left side for radar chart
+                            # Use left side for radar chart - make it slightly smaller for more spacing
+
                             radar_rect = pygame.Rect(
+
                                 section['rect'].x + 20,
-                                section['rect'].y + 40,
-                                section['rect'].height - 60,  # Make it square
-                                section['rect'].height - 60
+
+                                section['rect'].y + 50,  # Moved down for more title space
+
+                                section['rect'].height - 70,  # Make it square and smaller
+
+                                section['rect'].height - 70
+
                             )
 
                             # Use right side for bar graph
+
                             bar_rect = pygame.Rect(
+
                                 radar_rect.right + 50,
-                                section['rect'].y + 40,
+
+                                section['rect'].y + 50,  # Moved down to match radar
+
                                 section['rect'].right - radar_rect.right - 70,
-                                section['rect'].height - 60
+
+                                section['rect'].height - 70
+
                             )
 
-                            # Create an improved radar chart
+                            # Titles with improved positioning - completely separate from graphs
+
+                            legend_font = pygame.font.SysFont('Arial', 12)  # Smaller font
+
+                            section_title_font = pygame.font.SysFont('Arial', 14, bold=True)  # Bold font for main title
+
+                            # Main section title - positioned at the very top with adequate spacing
+
+                            section_title = section_title_font.render("Sensor Readings", True, WHITE)
+
+                            combined_screen.blit(section_title,
+
+                                                 (section['rect'].x + (section['rect'].width // 2) - (
+                                                             section_title.get_width() // 2),
+
+                                                  section['rect'].y + 5))
+
+                            # Separate titles for radar and bar charts
+
+                            radar_title = legend_font.render("Proximity Radar (Red = Close, White = Far)", True, WHITE)
+
+                            bar_title = legend_font.render("Distance Readings", True, WHITE)
+
+                            # Position radar title above radar chart
+
+                            radar_title_x = radar_rect.centerx - radar_title.get_width() // 2
+
+                            combined_screen.blit(radar_title, (radar_title_x, radar_rect.top - 20))
+
+                            # Position bar title above bar chart
+
+                            bar_title_x = bar_rect.centerx - bar_title.get_width() // 2
+
+                            combined_screen.blit(bar_title, (bar_title_x, bar_rect.top - 20))
+
+                            # Create the radar chart
+
                             center_x = radar_rect.centerx
+
                             center_y = radar_rect.centery
+
                             radius = min(radar_rect.width, radar_rect.height) // 2 - 10
 
                             # Normalize readings
+
                             max_reading = MAX_SENSOR_DISTANCE
+
                             normalized_readings = [min(1.0, r / max_reading) for r in sensor_readings]
 
                             # Draw sensor names and directions
+
                             name_font = pygame.font.SysFont('Arial', 12)
 
                             # Draw concentric circles for distance reference
+
                             for i in range(4):
+
                                 r = radius * (i + 1) / 4
+
                                 pygame.draw.circle(combined_screen, DARK_GRAY, (center_x, center_y), int(r), 1)
+
                                 # Add distance label
+
                                 if i > 0:
                                     dist_label = name_font.render(f"{int(MAX_SENSOR_DISTANCE * i / 4)}", True,
                                                                   LIGHT_GRAY)
+
                                     combined_screen.blit(dist_label, (center_x - 8, center_y - int(r) - 10))
 
                             # Draw sensor lines and labels
+
                             for i in range(len(normalized_readings)):
                                 angle = sensor_angles[i]
+
                                 # Draw line from center to edge
+
                                 end_x = center_x + radius * math.cos(angle)
+
                                 end_y = center_y + radius * math.sin(angle)
+
                                 pygame.draw.line(combined_screen, DARK_GRAY, (center_x, center_y), (end_x, end_y), 1)
 
                                 # Draw sensor label at outer edge
+
                                 label_x = center_x + (radius + 15) * math.cos(angle)
+
                                 label_y = center_y + (radius + 15) * math.sin(angle)
+
                                 label = name_font.render(sensor_names[i], True, WHITE)
+
                                 # Center the text around the point
+
                                 label_rect = label.get_rect(center=(label_x, label_y))
+
                                 combined_screen.blit(label, label_rect)
 
                                 # Draw actual sensor reading point
+
                                 r = radius * (1 - normalized_readings[i])
+
                                 point_x = center_x + r * math.cos(angle)
+
                                 point_y = center_y + r * math.sin(angle)
 
                                 # Draw a colored circle showing reading
+
                                 color_intensity = int(255 * (1 - normalized_readings[i]))
+
                                 point_color = (255, color_intensity, color_intensity)
+
                                 pygame.draw.circle(combined_screen, point_color, (int(point_x), int(point_y)), 6)
 
                             # Connect the points to form a better visualization
+
                             points = []
+
                             for i in range(len(normalized_readings)):
                                 angle = sensor_angles[i]
+
                                 r = radius * (1 - normalized_readings[i])
+
                                 point_x = center_x + r * math.cos(angle)
+
                                 point_y = center_y + r * math.sin(angle)
+
                                 points.append((int(point_x), int(point_y)))
 
                             if len(points) > 2:
+
                                 # Create a semi-transparent effect by layering colors
+
                                 for alpha in range(3):
+
                                     alpha_factor = (3 - alpha) / 3
+
                                     alpha_color = (
+
                                         int(180 * alpha_factor),
+
                                         int(20 * alpha_factor),
+
                                         int(20 * alpha_factor)
+
                                     )
+
                                     alpha_points = []
+
                                     for i, point in enumerate(points):
                                         angle = sensor_angles[i]
+
                                         r = radius * (1 - normalized_readings[i] * (1 - alpha * 0.2))
+
                                         px = center_x + r * math.cos(angle)
+
                                         py = center_y + r * math.sin(angle)
+
                                         alpha_points.append((int(px), int(py)))
 
                                     # Draw filled and outline
+
                                     pygame.draw.polygon(combined_screen, alpha_color, alpha_points, 0)
 
                                 # Final outline
+
                                 pygame.draw.polygon(combined_screen, RED, points, 2)
 
-                            # Add a legend
-                            legend_font = pygame.font.SysFont('Arial', 14)
-                            legend_text = legend_font.render("Sensor Proximity Radar (Red = Close, White = Far)", True,
-                                                             WHITE)
-                            combined_screen.blit(legend_text,
-                                                 (center_x - legend_text.get_width() // 2, section['rect'].y + 15))
-
                             # Draw bar chart on the right side
+
                             bar_width = (bar_rect.width) / len(sensor_readings)
+
                             bar_font = pygame.font.SysFont('Arial', 11)
 
                             # Draw axis
+
                             pygame.draw.line(combined_screen, WHITE,
+
                                              (bar_rect.left, bar_rect.bottom),
+
                                              (bar_rect.right, bar_rect.bottom), 1)
 
-                            # Title for bar chart
-                            bar_title = legend_font.render("Distance Readings", True, WHITE)
-                            combined_screen.blit(bar_title,
-                                                 (
-                                                     bar_rect.centerx - bar_title.get_width() // 2,
-                                                     section['rect'].y + 15))
-
                             # Y-axis labels and grid lines
+
                             for i in range(5):
                                 y_pos = bar_rect.bottom - (i * bar_rect.height // 4)
+
                                 y_value = (i * MAX_SENSOR_DISTANCE // 4)
+
                                 y_label = bar_font.render(f"{y_value}", True, LIGHT_GRAY)
+
                                 combined_screen.blit(y_label, (bar_rect.left - y_label.get_width() - 5, y_pos - 7))
 
                                 # Grid line
+
                                 pygame.draw.line(combined_screen, DARK_GRAY,
+
                                                  (bar_rect.left, y_pos),
+
                                                  (bar_rect.right, y_pos), 1)
 
                             # Draw bars
+
                             for i, reading in enumerate(sensor_readings):
+
                                 x = bar_rect.left + i * bar_width
+
                                 bar_height = (reading / MAX_SENSOR_DISTANCE) * bar_rect.height
 
                                 # Determine color based on proximity (red for close, green for far)
+
                                 proximity_factor = 1 - (reading / MAX_SENSOR_DISTANCE)
+
                                 bar_color = (
+
                                     int(255 * proximity_factor),
+
                                     int(255 * (1 - proximity_factor)),
+
                                     0
+
                                 )
 
+                                # Draw the actual bar - ensure it's visible even for small readings
+
+                                min_visible_height = 2  # Minimum height to ensure bars are visible
+
+                                visible_height = max(bar_height, min_visible_height)
+
                                 pygame.draw.rect(combined_screen, bar_color,
-                                                 (x, bar_rect.bottom - bar_height,
-                                                  bar_width - 2, bar_height))
+
+                                                 (x, bar_rect.bottom - visible_height,
+
+                                                  bar_width - 2, visible_height))
 
                                 # Add sensor name below bar
+
                                 name_label = bar_font.render(sensor_names[i], True, LIGHT_GRAY)
+
                                 label_x = x + bar_width / 2 - name_label.get_width() / 2
+
                                 combined_screen.blit(name_label, (label_x, bar_rect.bottom + 5))
 
                                 # Add value above bar
+
                                 value_label = bar_font.render(f"{int(reading)}", True, WHITE)
+
                                 value_x = x + bar_width / 2 - value_label.get_width() / 2
+
                                 value_y = bar_rect.bottom - bar_height - value_label.get_height() - 2
+
                                 if value_y < bar_rect.top:  # Ensure label isn't too high
+
                                     value_y = bar_rect.top
+
                                 combined_screen.blit(value_label, (value_x, value_y))
 
             # Update display
