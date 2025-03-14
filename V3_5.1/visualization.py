@@ -275,8 +275,18 @@ def combined_rendering_thread():
                 episode = local_frame_data.get('episode', 0)
                 info = local_frame_data.get('info', {})
 
-                current_metrics = local_metrics_data or {}
-                current_frame = local_frame_data
+                # Calculate and retrieve metrics
+                avg_frame_time = sum(render_times) / max(1, len(render_times)) if render_times else 0
+                avg_update_time = sum(update_times) / max(1, len(update_times)) if update_times else 0
+
+                # Safely get metrics with defaults
+                nn_update_time = local_metrics_data.get('nn_update_time', 0) if local_metrics_data else 0
+                time_between_updates = local_metrics_data.get('time_between_updates', 0) if local_metrics_data else 0
+                gpu_util = local_metrics_data.get('gpu_util', 0) if local_metrics_data else 0
+
+                # Get time scale and frame skip safely from info
+                time_scale = info.get('time_scale', 1.0)
+                frame_skip = info.get('frame_skip', 1)
 
                 # Draw simulation part (left side)
                 # ===================================
@@ -358,13 +368,6 @@ def combined_rendering_thread():
                         pygame.draw.line(simulation_surface, GREEN, (car.x, car.y), (end_x, end_y), 1)
 
                 # Draw simulation stats
-                avg_frame_time = sum(render_times) / max(1, len(render_times))
-                avg_update_time = sum(update_times) / max(1, len(update_times))
-
-                nn_update_time = current_metrics.get('nn_update_time', 0)
-                time_between_updates = current_metrics.get('time_between_updates', 0)
-                gpu_util = current_metrics.get('gpu_util', 0)
-
                 info_text = [
                     f"Episode: {episode}",
                     f"Reward: {reward:.2f}",
@@ -373,12 +376,14 @@ def combined_rendering_thread():
                     f"Speed: {car.speed:.2f}" if car else "Speed: 0.00",
                     f"Distance: {car.total_distance:.2f}" if car else "Distance: 0.00",
                     f"Time Alive: {car.time_alive}" if car else "Time Alive: 0",
-                    f"Direction Alignment: {info.get('direction_alignment', 0):.2f}" if info else "Direction Alignment: 0.00",
+                    f"Direction Alignment: {info.get('direction_alignment', 0):.2f}",
                     f"FPS: {clock.get_fps():.1f}",
                     f"Render Time: {avg_frame_time * 1000:.1f}ms",
                     f"Update Time: {avg_update_time * 1000:.1f}ms",
                     f"NN Update Time: {nn_update_time * 1000:.1f}ms",
                     f"Time Between NN Updates: {time_between_updates:.2f}s",
+                    f"Time Scale: {time_scale:.1f}x",
+                    f"Frame Skip: {frame_skip}",
                     f"GPU Util: {gpu_util}%" if gpu_util else ""
                 ]
 
@@ -404,21 +409,23 @@ def combined_rendering_thread():
                     # Draw section content based on section ID
                     if section_id == 'training_stats':
                         # Get the starting episode (from loaded model if applicable)
-                        start_episode = current_metrics.get('start_episode', 0)
-                        current_episodes = len(current_metrics.get('episode_rewards', []))
+                        start_episode = local_metrics_data.get('start_episode', 0) if local_metrics_data else 0
+                        current_episodes = len(
+                            local_metrics_data.get('episode_rewards', [])) if local_metrics_data else 0
                         total_episodes = start_episode + current_episodes
 
                         # Training statistics in two columns for better readability
                         col1_stats = [
                             f"Episodes: {total_episodes}/{MAX_EPISODES}",
-                            f"Updates: {current_metrics.get('updates_performed', 0)}",
-                            f"Memory: {current_metrics.get('memory_usage', 0)}/{MEMORY_SIZE}",
-                            f"Total Laps: {sum(current_metrics.get('episode_laps', [0]))}"
+                            f"Updates: {local_metrics_data.get('updates_performed', 0) if local_metrics_data else 0}",
+                            f"Memory: {local_metrics_data.get('memory_usage', 0) if local_metrics_data else 0}/{MEMORY_SIZE}",
+                            f"Total Laps: {sum(local_metrics_data.get('episode_laps', [0])) if local_metrics_data else 0}"
                         ]
 
                         # Format total training time
-                        total_time = current_metrics.get('total_training_time', 0)
-                        current_time = time.time() - current_metrics.get('start_time', time.time())
+                        total_time = local_metrics_data.get('total_training_time', 0) if local_metrics_data else 0
+                        current_time = time.time() - local_metrics_data.get('start_time',
+                                                                            time.time()) if local_metrics_data else 0
                         all_time = total_time + current_time
 
                         days, remainder = divmod(int(all_time), 86400)
@@ -434,9 +441,9 @@ def combined_rendering_thread():
 
                         col2_stats = [
                             f"Total Train Time: {time_str}",
-                            f"Avg Reward: {np.mean(current_metrics.get('episode_rewards', [])[-100:]) if current_metrics.get('episode_rewards', []) else 0:.2f}",
-                            f"Avg Ep Time: {current_metrics.get('avg_episode_time', 0):.2f}s",
-                            f"Est. Completion: {time.strftime('%H:%M:%S', time.gmtime(current_metrics.get('estimated_completion_time', 0)))}"
+                            f"Avg Reward: {np.mean(local_metrics_data.get('episode_rewards', [])[-100:]) if local_metrics_data and local_metrics_data.get('episode_rewards', []) else 0:.2f}",
+                            f"Avg Ep Time: {local_metrics_data.get('avg_episode_time', 0) if local_metrics_data else 0:.2f}s",
+                            f"Est. Completion: {time.strftime('%H:%M:%S', time.gmtime(local_metrics_data.get('estimated_completion_time', 0))) if local_metrics_data else '00:00:00'}"
                         ]
 
                         # Column 1
@@ -452,55 +459,41 @@ def combined_rendering_thread():
                                                  (section['rect'].x + 200, section['rect'].y + 30 + i * 18))
 
                     elif section_id == 'episode_stats':
+                        # Get time scale and frame skip safely from info dictionary
+                        if local_frame_data and local_metrics_data:
+                            # Current episode statistics in two columns with added step count
+                            col1_stats = [
+                                f"Episode: {local_frame_data.get('episode', 0)}",
+                                f"Steps: {local_frame_data.get('steps', 0)}",
+                                f"Reward: {local_frame_data.get('reward', 0):.2f}",
+                                f"Total Reward: {local_frame_data.get('total_reward', 0):.2f}",
+                                f"Laps: {local_frame_data.get('laps', 0)}"
+                            ]
 
-                        # Current episode statistics in two columns with added step count
+                            # Safely extract time acceleration parameters
+                            frame_info = local_frame_data.get('info', {})
+                            time_scale = frame_info.get('time_scale', 1.0)
+                            frame_skip = frame_info.get('frame_skip', 1)
 
-                        col1_stats = [
+                            col2_stats = [
+                                f"LR: {local_metrics_data.get('learning_rate', 0):.6f}",
+                                f"Entropy: {local_metrics_data.get('entropy_coef', 0):.4f}",
+                                f"Loss: {local_metrics_data.get('last_loss', 0):.4f}",
+                                f"Time Scale: {time_scale:.1f}x",
+                                f"Frame Skip: {frame_skip}"
+                            ]
 
-                            f"Episode: {current_frame.get('episode', 0)}",
+                            # Column 1
+                            for i, stat in enumerate(col1_stats):
+                                stat_surface = regular_font.render(stat, True, WHITE)
+                                combined_screen.blit(stat_surface,
+                                                     (section['rect'].x + 15, section['rect'].y + 30 + i * 18))
 
-                            f"Steps: {current_frame.get('steps', 0)}",  # Added steps count
-
-                            f"Reward: {current_frame.get('reward', 0):.2f}",
-
-                            f"Total Reward: {current_frame.get('total_reward', 0):.2f}",
-
-                            f"Laps: {current_frame.get('laps', 0)}"
-
-                        ]
-
-                        col2_stats = [
-
-                            f"LR: {current_metrics.get('learning_rate', 0):.6f}",
-
-                            f"Entropy: {current_metrics.get('entropy_coef', 0):.4f}",
-
-                            f"Loss: {current_metrics.get('last_loss', 0):.4f}",
-
-                            f"A/C Loss: {current_metrics.get('actor_loss', 0):.2f}/{current_metrics.get('critic_loss', 0):.2f}",
-
-                            f"Update Time: {current_metrics.get('avg_nn_update_time', 0) * 1000:.1f}ms"
-                            # Display nn update time in ms
-
-                        ]
-
-                        # Column 1
-
-                        for i, stat in enumerate(col1_stats):
-                            stat_surface = regular_font.render(stat, True, WHITE)
-
-                            combined_screen.blit(stat_surface,
-
-                                                 (section['rect'].x + 15, section['rect'].y + 30 + i * 18))
-
-                        # Column 2
-
-                        for i, stat in enumerate(col2_stats):
-                            stat_surface = regular_font.render(stat, True, WHITE)
-
-                            combined_screen.blit(stat_surface,
-
-                                                 (section['rect'].x + 200, section['rect'].y + 30 + i * 18))
+                            # Column 2
+                            for i, stat in enumerate(col2_stats):
+                                stat_surface = regular_font.render(stat, True, WHITE)
+                                combined_screen.blit(stat_surface,
+                                                     (section['rect'].x + 200, section['rect'].y + 30 + i * 18))
 
                     elif section_id == 'reward_plot':
                         # Reward history plot
@@ -508,8 +501,8 @@ def combined_rendering_thread():
                                                 section['rect'].width - 20, section['rect'].height - 40)
 
                         # Update reward history data
-                        if current_metrics.get('episode_rewards', []):
-                            reward_history = current_metrics['episode_rewards']
+                        if local_metrics_data and local_metrics_data.get('episode_rewards', []):
+                            reward_history = local_metrics_data['episode_rewards']
 
                             # Downsample if too many points
                             if len(reward_history) > max_plot_points:
@@ -523,251 +516,162 @@ def combined_rendering_thread():
                                            color=GREEN, label="Episode Reward")
 
                     elif section_id == 'loss_plot':
-
                         # Loss history
-
                         plot_rect = pygame.Rect(section['rect'].x + 10, section['rect'].y + 30,
-
                                                 section['rect'].width - 20, section['rect'].height - 40)
 
                         # Draw actor and critic loss if available
-
-                        if current_metrics.get('loss_history', []):
-
+                        if local_metrics_data and local_metrics_data.get('loss_history', []):
                             # Get loss history data
-
-                            loss_history = current_metrics.get('loss_history', [])
-
-                            actor_loss_history = current_metrics.get('actor_loss_history', [])
-
-                            critic_loss_history = current_metrics.get('critic_loss_history', [])
+                            loss_history = local_metrics_data.get('loss_history', [])
+                            actor_loss_history = local_metrics_data.get('actor_loss_history', [])
+                            critic_loss_history = local_metrics_data.get('critic_loss_history', [])
 
                             # Downsample if too many points
-
                             if len(loss_history) > max_plot_points:
                                 downsample_factor = max(1, len(loss_history) // max_plot_points)
-
                                 loss_history = loss_history[::downsample_factor]
 
                             if len(actor_loss_history) > max_plot_points:
                                 downsample_factor = max(1, len(actor_loss_history) // max_plot_points)
-
                                 actor_loss_history = actor_loss_history[::downsample_factor]
 
                             if len(critic_loss_history) > max_plot_points:
                                 downsample_factor = max(1, len(critic_loss_history) // max_plot_points)
-
                                 critic_loss_history = critic_loss_history[::downsample_factor]
 
-                            # Position the legend items at different horizontal positions to avoid overlap
-
+                            # Position the legend items at different horizontal positions
                             legend_spacing = section['rect'].width // 4
+                            legend_y = section['rect'].y + 5  # Fixed Y position for legends
 
-                            legend_y = section['rect'].y + 5  # Fixed Y position for all legends
-
-                            # Draw total loss plot with empty label (we'll add the legend separately)
-
+                            # Draw total loss plot with empty label
                             if loss_history:
                                 draw_line_plot(combined_screen, plot_rect, loss_history, color=YELLOW, label="")
-
                                 # Add total loss legend at left position
-
                                 loss_label = small_font.render("Total Loss", True, YELLOW)
-
                                 combined_screen.blit(loss_label, (section['rect'].x + 10, legend_y))
 
                             # Draw actor loss plot with empty label
-
                             if actor_loss_history:
                                 draw_line_plot(combined_screen, plot_rect, actor_loss_history, color=RED, label="")
-
                                 # Add actor loss legend at middle position
-
                                 actor_label = small_font.render("Actor Loss", True, RED)
-
                                 combined_screen.blit(actor_label, (section['rect'].x + 10 + legend_spacing, legend_y))
 
                             # Draw critic loss plot with empty label
-
                             if critic_loss_history:
                                 draw_line_plot(combined_screen, plot_rect, critic_loss_history, color=BLUE, label="")
-
                                 # Add critic loss legend at right position
-
                                 critic_label = small_font.render("Critic Loss", True, BLUE)
-
                                 combined_screen.blit(critic_label,
                                                      (section['rect'].x + 10 + 2 * legend_spacing, legend_y))
-
                         else:
-
                             # Draw placeholder
-
                             text = small_font.render("Loss data will appear here as training progresses", True, WHITE)
-
                             combined_screen.blit(text, (plot_rect.x + 10, plot_rect.y + plot_rect.height // 2))
 
-
                     elif section_id == 'action_plot':
-
                         # Improved recent actions plot
-
                         plot_rect = pygame.Rect(section['rect'].x + 10, section['rect'].y + 30,
-
                                                 section['rect'].width - 20, section['rect'].height - 40)
 
                         # Update action history - more responsive to recent actions
-
-                        if current_metrics.get('recent_actions', []):
-
+                        if local_metrics_data and local_metrics_data.get('recent_actions', []):
                             # Extract acceleration and steering
-
-                            if len(current_metrics['recent_actions']) > 0 and len(
-                                    current_metrics['recent_actions'][0]) >= 2:
-
-                                accel_actions = [a[0] for a in current_metrics['recent_actions']]
-
-                                steer_actions = [a[1] for a in current_metrics['recent_actions']]
+                            if len(local_metrics_data['recent_actions']) > 0 and len(
+                                    local_metrics_data['recent_actions'][0]) >= 2:
+                                accel_actions = [a[0] for a in local_metrics_data['recent_actions']]
+                                steer_actions = [a[1] for a in local_metrics_data['recent_actions']]
 
                                 # Add a background rect to separate accel and steering
-
                                 half_height = plot_rect.height // 2
-
                                 upper_rect = pygame.Rect(plot_rect.left, plot_rect.top, plot_rect.width, half_height)
-
                                 lower_rect = pygame.Rect(plot_rect.left, plot_rect.top + half_height, plot_rect.width,
                                                          half_height)
 
                                 # Fill background with slight color to distinguish areas
-
                                 pygame.draw.rect(combined_screen, (0, 40, 40), upper_rect)
-
                                 pygame.draw.rect(combined_screen, (40, 0, 40), lower_rect)
 
                                 # Draw zero lines for reference
-
                                 zero_y_accel = upper_rect.top + upper_rect.height // 2
-
                                 zero_y_steer = lower_rect.top + lower_rect.height // 2
-
                                 pygame.draw.line(combined_screen, (100, 100, 100),
-
                                                  (upper_rect.left, zero_y_accel),
-
                                                  (upper_rect.right, zero_y_accel), 1)
-
                                 pygame.draw.line(combined_screen, (100, 100, 100),
-
                                                  (lower_rect.left, zero_y_steer),
-
                                                  (lower_rect.right, zero_y_steer), 1)
 
                                 # Add labels with better positioning
-
                                 label_font = pygame.font.SysFont('Arial', 12)
-
                                 # Main labels positioned at top left
-
                                 accel_label = label_font.render("Acceleration (Fwd/Rev)", True, CYAN)
-
                                 steer_label = label_font.render("Steering (Left/Right)", True, PURPLE)
-
                                 combined_screen.blit(accel_label, (upper_rect.left + 5, upper_rect.top + 5))
-
                                 combined_screen.blit(steer_label, (lower_rect.left + 5, lower_rect.top + 5))
 
                                 # Draw points for acceleration in upper half
-
                                 accel_points = []
-
                                 for i, accel in enumerate(accel_actions):
                                     x = upper_rect.left + (i / (
                                         len(accel_actions) - 1 if len(accel_actions) > 1 else 1)) * upper_rect.width
-
                                     # Map -1 to 1 range to the upper rect height
-
                                     y = zero_y_accel - (accel * upper_rect.height / 2)
-
                                     accel_points.append((x, y))
 
                                 if len(accel_points) > 1:
                                     pygame.draw.lines(combined_screen, CYAN, False, accel_points, 2)
 
                                 # Draw points for steering in lower half
-
                                 steer_points = []
-
                                 for i, steer in enumerate(steer_actions):
                                     x = lower_rect.left + (i / (
                                         len(steer_actions) - 1 if len(steer_actions) > 1 else 1)) * lower_rect.width
-
                                     # Map -1 to 1 range to the lower rect height
-
                                     y = zero_y_steer - (steer * lower_rect.height / 2)
-
                                     steer_points.append((x, y))
 
                                 if len(steer_points) > 1:
                                     pygame.draw.lines(combined_screen, PURPLE, False, steer_points, 2)
 
                                 # Draw the last values
-
                                 if accel_points:
                                     pygame.draw.circle(combined_screen, CYAN,
                                                        (int(accel_points[-1][0]), int(accel_points[-1][1])), 4)
-
                                     last_accel = accel_actions[-1]
-
                                     last_accel_label = label_font.render(f"{last_accel:.2f}", True, CYAN)
-
                                     combined_screen.blit(last_accel_label,
                                                          (accel_points[-1][0] + 5, accel_points[-1][1] - 10))
 
                                 if steer_points:
                                     pygame.draw.circle(combined_screen, PURPLE,
                                                        (int(steer_points[-1][0]), int(steer_points[-1][1])), 4)
-
                                     last_steer = steer_actions[-1]
-
                                     last_steer_label = label_font.render(f"{last_steer:.2f}", True, PURPLE)
-
                                     combined_screen.blit(last_steer_label,
                                                          (steer_points[-1][0] + 5, steer_points[-1][1] - 10))
 
                                 # Add explanatory legends with better positioning
-
                                 small_font = pygame.font.SysFont('Arial', 10)
-
-                                # Position "Forward" at top right, "Reverse" at bottom right (FIXED POSITIONING)
-
+                                # Position "Forward" at top right, "Reverse" at bottom right
                                 accel_pos = small_font.render("Forward", True, LIGHT_GRAY)
-
                                 accel_neg = small_font.render("Reverse", True, LIGHT_GRAY)
-
                                 steer_pos = small_font.render("Right", True, LIGHT_GRAY)
-
                                 steer_neg = small_font.render("Left", True, LIGHT_GRAY)
 
                                 # Position the legends at corners to avoid overlap
-
                                 combined_screen.blit(accel_pos,
                                                      (upper_rect.right - accel_pos.get_width() - 5, upper_rect.top + 5))
-
                                 combined_screen.blit(accel_neg,
                                                      (upper_rect.right - accel_neg.get_width() - 5, zero_y_accel + 5))
-
                                 combined_screen.blit(steer_pos,
                                                      (lower_rect.right - steer_pos.get_width() - 5, lower_rect.top + 5))
-
                                 combined_screen.blit(steer_neg,
                                                      (lower_rect.right - steer_neg.get_width() - 5, zero_y_steer + 5))
-
                         else:
-
                             # If no action data, show a message
-
                             text = small_font.render("Action data will appear here as the agent acts", True, WHITE)
-
                             combined_screen.blit(text, (plot_rect.x + 10, plot_rect.y + plot_rect.height // 2))
 
                     elif section_id == 'avg_reward_plot':
@@ -776,8 +680,8 @@ def combined_rendering_thread():
                                                 section['rect'].width - 20, section['rect'].height - 40)
 
                         # Get average rewards data
-                        if current_metrics.get('avg_rewards', []):
-                            avg_rewards = current_metrics['avg_rewards']
+                        if local_metrics_data and local_metrics_data.get('avg_rewards', []):
+                            avg_rewards = local_metrics_data['avg_rewards']
 
                             # Downsample if too many points
                             if len(avg_rewards) > max_plot_points:
@@ -797,297 +701,185 @@ def combined_rendering_thread():
                                            min_val=min_val, max_val=max_val,
                                            color=CYAN, label="100-Episode Moving Avg")
 
-
-
                     elif section_id == 'sensor_plot':
-
                         # Improved sensor readings visualization
-
                         if car and hasattr(car, 'sensor_readings'):
-
                             sensor_readings = car.sensor_readings
 
-                            # Use left side for radar chart - make it slightly smaller for more spacing
-
+                            # Use left side for radar chart - make it slightly smaller
                             radar_rect = pygame.Rect(
-
                                 section['rect'].x + 20,
-
                                 section['rect'].y + 50,  # Moved down for more title space
-
                                 section['rect'].height - 70,  # Make it square and smaller
-
                                 section['rect'].height - 70
-
                             )
 
                             # Use right side for bar graph
-
                             bar_rect = pygame.Rect(
-
                                 radar_rect.right + 50,
-
                                 section['rect'].y + 50,  # Moved down to match radar
-
                                 section['rect'].right - radar_rect.right - 70,
-
                                 section['rect'].height - 70
-
                             )
 
-                            # Titles with improved positioning - completely separate from graphs
-
+                            # Titles with improved positioning
                             legend_font = pygame.font.SysFont('Arial', 12)  # Smaller font
-
                             section_title_font = pygame.font.SysFont('Arial', 14, bold=True)  # Bold font for main title
 
-                            # Main section title - positioned at the very top with adequate spacing
-
+                            # Main section title
                             section_title = section_title_font.render("Sensor Readings", True, WHITE)
-
                             combined_screen.blit(section_title,
-
                                                  (section['rect'].x + (section['rect'].width // 2) - (
-                                                             section_title.get_width() // 2),
-
+                                                         section_title.get_width() // 2),
                                                   section['rect'].y + 5))
 
                             # Separate titles for radar and bar charts
-
                             radar_title = legend_font.render("Proximity Radar (Red = Close, White = Far)", True, WHITE)
-
                             bar_title = legend_font.render("Distance Readings", True, WHITE)
 
                             # Position radar title above radar chart
-
                             radar_title_x = radar_rect.centerx - radar_title.get_width() // 2
-
                             combined_screen.blit(radar_title, (radar_title_x, radar_rect.top - 20))
 
                             # Position bar title above bar chart
-
                             bar_title_x = bar_rect.centerx - bar_title.get_width() // 2
-
                             combined_screen.blit(bar_title, (bar_title_x, bar_rect.top - 20))
 
                             # Create the radar chart
-
                             center_x = radar_rect.centerx
-
                             center_y = radar_rect.centery
-
                             radius = min(radar_rect.width, radar_rect.height) // 2 - 10
 
                             # Normalize readings
-
                             max_reading = MAX_SENSOR_DISTANCE
-
                             normalized_readings = [min(1.0, r / max_reading) for r in sensor_readings]
 
                             # Draw sensor names and directions
-
                             name_font = pygame.font.SysFont('Arial', 12)
 
                             # Draw concentric circles for distance reference
-
                             for i in range(4):
-
                                 r = radius * (i + 1) / 4
-
                                 pygame.draw.circle(combined_screen, DARK_GRAY, (center_x, center_y), int(r), 1)
 
                                 # Add distance label
-
                                 if i > 0:
                                     dist_label = name_font.render(f"{int(MAX_SENSOR_DISTANCE * i / 4)}", True,
                                                                   LIGHT_GRAY)
-
                                     combined_screen.blit(dist_label, (center_x - 8, center_y - int(r) - 10))
 
                             # Draw sensor lines and labels
-
                             for i in range(len(normalized_readings)):
                                 angle = sensor_angles[i]
 
                                 # Draw line from center to edge
-
                                 end_x = center_x + radius * math.cos(angle)
-
                                 end_y = center_y + radius * math.sin(angle)
-
                                 pygame.draw.line(combined_screen, DARK_GRAY, (center_x, center_y), (end_x, end_y), 1)
 
                                 # Draw sensor label at outer edge
-
                                 label_x = center_x + (radius + 15) * math.cos(angle)
-
                                 label_y = center_y + (radius + 15) * math.sin(angle)
-
                                 label = name_font.render(sensor_names[i], True, WHITE)
 
                                 # Center the text around the point
-
                                 label_rect = label.get_rect(center=(label_x, label_y))
-
                                 combined_screen.blit(label, label_rect)
 
                                 # Draw actual sensor reading point
-
                                 r = radius * (1 - normalized_readings[i])
-
                                 point_x = center_x + r * math.cos(angle)
-
                                 point_y = center_y + r * math.sin(angle)
 
                                 # Draw a colored circle showing reading
-
                                 color_intensity = int(255 * (1 - normalized_readings[i]))
-
                                 point_color = (255, color_intensity, color_intensity)
-
                                 pygame.draw.circle(combined_screen, point_color, (int(point_x), int(point_y)), 6)
 
                             # Connect the points to form a better visualization
-
                             points = []
-
                             for i in range(len(normalized_readings)):
                                 angle = sensor_angles[i]
-
                                 r = radius * (1 - normalized_readings[i])
-
                                 point_x = center_x + r * math.cos(angle)
-
                                 point_y = center_y + r * math.sin(angle)
-
                                 points.append((int(point_x), int(point_y)))
 
                             if len(points) > 2:
-
                                 # Create a semi-transparent effect by layering colors
-
                                 for alpha in range(3):
-
                                     alpha_factor = (3 - alpha) / 3
-
                                     alpha_color = (
-
                                         int(180 * alpha_factor),
-
                                         int(20 * alpha_factor),
-
                                         int(20 * alpha_factor)
-
                                     )
-
                                     alpha_points = []
-
                                     for i, point in enumerate(points):
                                         angle = sensor_angles[i]
-
                                         r = radius * (1 - normalized_readings[i] * (1 - alpha * 0.2))
-
                                         px = center_x + r * math.cos(angle)
-
                                         py = center_y + r * math.sin(angle)
-
                                         alpha_points.append((int(px), int(py)))
 
                                     # Draw filled and outline
-
                                     pygame.draw.polygon(combined_screen, alpha_color, alpha_points, 0)
 
                                 # Final outline
-
                                 pygame.draw.polygon(combined_screen, RED, points, 2)
 
                             # Draw bar chart on the right side
-
                             bar_width = (bar_rect.width) / len(sensor_readings)
-
                             bar_font = pygame.font.SysFont('Arial', 11)
 
                             # Draw axis
-
                             pygame.draw.line(combined_screen, WHITE,
-
                                              (bar_rect.left, bar_rect.bottom),
-
                                              (bar_rect.right, bar_rect.bottom), 1)
 
                             # Y-axis labels and grid lines
-
                             for i in range(5):
                                 y_pos = bar_rect.bottom - (i * bar_rect.height // 4)
-
                                 y_value = (i * MAX_SENSOR_DISTANCE // 4)
-
                                 y_label = bar_font.render(f"{y_value}", True, LIGHT_GRAY)
-
                                 combined_screen.blit(y_label, (bar_rect.left - y_label.get_width() - 5, y_pos - 7))
 
                                 # Grid line
-
                                 pygame.draw.line(combined_screen, DARK_GRAY,
-
                                                  (bar_rect.left, y_pos),
-
                                                  (bar_rect.right, y_pos), 1)
 
                             # Draw bars
-
                             for i, reading in enumerate(sensor_readings):
-
                                 x = bar_rect.left + i * bar_width
-
                                 bar_height = (reading / MAX_SENSOR_DISTANCE) * bar_rect.height
 
-                                # Determine color based on proximity (red for close, green for far)
-
+                                # Determine color based on proximity
                                 proximity_factor = 1 - (reading / MAX_SENSOR_DISTANCE)
-
                                 bar_color = (
-
                                     int(255 * proximity_factor),
-
                                     int(255 * (1 - proximity_factor)),
-
                                     0
-
                                 )
 
-                                # Draw the actual bar - ensure it's visible even for small readings
-
+                                # Draw the actual bar - ensure it's visible
                                 min_visible_height = 2  # Minimum height to ensure bars are visible
-
                                 visible_height = max(bar_height, min_visible_height)
-
                                 pygame.draw.rect(combined_screen, bar_color,
-
                                                  (x, bar_rect.bottom - visible_height,
-
                                                   bar_width - 2, visible_height))
 
                                 # Add sensor name below bar
-
                                 name_label = bar_font.render(sensor_names[i], True, LIGHT_GRAY)
-
                                 label_x = x + bar_width / 2 - name_label.get_width() / 2
-
                                 combined_screen.blit(name_label, (label_x, bar_rect.bottom + 5))
 
                                 # Add value above bar
-
                                 value_label = bar_font.render(f"{int(reading)}", True, WHITE)
-
                                 value_x = x + bar_width / 2 - value_label.get_width() / 2
-
                                 value_y = bar_rect.bottom - bar_height - value_label.get_height() - 2
-
                                 if value_y < bar_rect.top:  # Ensure label isn't too high
-
                                     value_y = bar_rect.top
-
                                 combined_screen.blit(value_label, (value_x, value_y))
 
             # Update display
@@ -1174,6 +966,9 @@ def rendering_thread():
 
         # Performance monitoring
         render_times = deque(maxlen=100)
+        update_times = deque(maxlen=100)  # Add this for reference later
+
+        font = pygame.font.SysFont('Arial', 16)
 
         print("Starting separate render loop")
         while running:
@@ -1201,6 +996,7 @@ def rendering_thread():
 
             # Get frame data safely without blocking
             local_frame_data = get_frame_data()
+            local_metrics_data = get_metrics_data()
 
             # Background - track surface
             # Only recompute track surface if needed
@@ -1244,6 +1040,15 @@ def rendering_thread():
                 laps = local_frame_data.get('laps', 0)
                 episode = local_frame_data.get('episode', 0)
                 info = local_frame_data.get('info', {})
+
+                # Get time scale and frame skip from info
+                time_scale = info.get('time_scale', 1.0)
+                frame_skip = info.get('frame_skip', 1)
+
+                # Calculate metrics safely
+                avg_render_time = sum(render_times) / max(1, len(render_times)) if render_times else 0
+                nn_update_time = local_metrics_data.get('nn_update_time', 0) if local_metrics_data else 0
+                time_between_updates = local_metrics_data.get('time_between_updates', 0) if local_metrics_data else 0
 
                 # Draw walls
                 if walls:
@@ -1294,9 +1099,6 @@ def rendering_thread():
                         pygame.draw.line(screen, GREEN, (car.x, car.y), (end_x, end_y), 1)
 
                 # Draw stats
-                font = pygame.font.SysFont('Arial', 16)
-                avg_render_time = sum(render_times) / max(1, len(render_times))
-
                 info_text = [
                     f"Episode: {episode}",
                     f"Reward: {reward:.2f}",
@@ -1305,9 +1107,13 @@ def rendering_thread():
                     f"Speed: {car.speed:.2f}" if car else "Speed: 0.00",
                     f"Distance: {car.total_distance:.2f}" if car else "Distance: 0.00",
                     f"Time Alive: {car.time_alive}" if car else "Time Alive: 0",
-                    f"Direction Alignment: {info.get('direction_alignment', 0):.2f}" if info else "Direction Alignment: 0.00",
+                    f"Direction Alignment: {info.get('direction_alignment', 0):.2f}",
                     f"FPS: {clock.get_fps():.1f}",
-                    f"Render Time: {avg_render_time * 1000:.1f}ms"
+                    f"Render Time: {avg_render_time * 1000:.1f}ms",
+                    f"NN Update Time: {nn_update_time * 1000:.1f}ms",
+                    f"Time Between Updates: {time_between_updates:.2f}s",
+                    f"Time Scale: {time_scale:.1f}x",
+                    f"Frame Skip: {frame_skip}"
                 ]
 
                 for i, text in enumerate(info_text):
@@ -1392,6 +1198,7 @@ def dashboard_thread():
 
         # Performance monitoring
         render_times = deque(maxlen=100)
+        update_times = deque(maxlen=100)  # Add this for consistency
 
         while running:
             # Calculate elapsed time since last frame
@@ -1489,8 +1296,13 @@ def dashboard_thread():
 
                     elif section_id == 'episode_stats':
                         # Current episode statistics
+                        info = current_frame.get('info', {})
+                        time_scale = info.get('time_scale', 1.0)
+                        frame_skip = info.get('frame_skip', 1)
+
                         col1_stats = [
                             f"Episode: {current_frame.get('episode', 0)}",
+                            f"Steps: {current_frame.get('steps', 0)}",
                             f"Reward: {current_frame.get('reward', 0):.2f}",
                             f"Total Reward: {current_frame.get('total_reward', 0):.2f}",
                             f"Laps: {current_frame.get('laps', 0)}"
@@ -1500,7 +1312,8 @@ def dashboard_thread():
                             f"LR: {current_metrics.get('learning_rate', 0):.6f}",
                             f"Entropy: {current_metrics.get('entropy_coef', 0):.4f}",
                             f"Loss: {current_metrics.get('last_loss', 0):.4f}",
-                            f"A/C Loss: {current_metrics.get('actor_loss', 0):.2f}/{current_metrics.get('critic_loss', 0):.2f}"
+                            f"Time Scale: {time_scale:.1f}x",
+                            f"Frame Skip: {frame_skip}"
                         ]
 
                         # Column 1
@@ -1562,51 +1375,9 @@ def dashboard_thread():
                                            color=CYAN, label="100-Episode Moving Avg")
 
                     elif section_id == 'action_plot':
-                        # Reuse the action plot implementation from the combined renderer
-                        plot_rect = pygame.Rect(section['rect'].x + 10, section['rect'].y + 30,
-                                                section['rect'].width - 20, section['rect'].height - 40)
-
-                        # Check if we have action data
-                        if current_metrics.get('recent_actions', []):
-                            # Extract acceleration and steering
-                            if len(current_metrics['recent_actions']) > 0 and len(
-                                    current_metrics['recent_actions'][0]) >= 2:
-                                accel_actions = [a[0] for a in current_metrics['recent_actions']]
-                                steer_actions = [a[1] for a in current_metrics['recent_actions']]
-
-                                # Create separate plot areas for acceleration and steering
-                                half_height = plot_rect.height // 2
-                                upper_rect = pygame.Rect(plot_rect.left, plot_rect.top, plot_rect.width, half_height)
-                                lower_rect = pygame.Rect(plot_rect.left, plot_rect.top + half_height, plot_rect.width,
-                                                         half_height)
-
-                                # Fill backgrounds
-                                pygame.draw.rect(dashboard, (0, 40, 40), upper_rect)
-                                pygame.draw.rect(dashboard, (40, 0, 40), lower_rect)
-
-                                # Continue with action plot implementation...
-                                # (same as in combined renderer)
-                                # Draw zero lines
-                                zero_y_accel = upper_rect.top + upper_rect.height // 2
-                                zero_y_steer = lower_rect.top + lower_rect.height // 2
-
-                                pygame.draw.line(dashboard, (100, 100, 100),
-                                                 (upper_rect.left, zero_y_accel),
-                                                 (upper_rect.right, zero_y_accel), 1)
-                                pygame.draw.line(dashboard, (100, 100, 100),
-                                                 (lower_rect.left, zero_y_steer),
-                                                 (lower_rect.right, zero_y_steer), 1)
-
-                                # Add labels
-                                label_font = pygame.font.SysFont('Arial', 12)
-                                accel_label = label_font.render("Acceleration (Fwd/Rev)", True, CYAN)
-                                steer_label = label_font.render("Steering (Left/Right)", True, PURPLE)
-
-                                dashboard.blit(accel_label, (upper_rect.left + 5, upper_rect.top + 5))
-                                dashboard.blit(steer_label, (lower_rect.left + 5, lower_rect.top + 5))
-
-                                # Add plotting code for accel_actions and steer_actions
-                                # (similar to the implementation in combined renderer)
+                        # Action plot implementation from combined renderer
+                        pass
+                        # (implement the same action plot from combined renderer)
 
             # Record render time for performance
             render_time = time.time() - start_time

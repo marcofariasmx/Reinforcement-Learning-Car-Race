@@ -76,6 +76,11 @@ LIGHT_GRAY = (200, 200, 200)
 PURPLE = (128, 0, 128)
 CYAN = (0, 255, 255)
 
+# Training acceleration parameters
+TIME_SCALE = 50.0  # Default: 1.0 (no acceleration), higher = faster simulation
+FRAME_SKIP = 1  # Default: 1 (no skipping), higher = skip more frames
+BATCH_UPDATE_FREQUENCY = 256  # Update neural network every N steps
+
 
 # Function to detect hardware capabilities and set optimal parameters
 def detect_hardware_capabilities():
@@ -186,7 +191,7 @@ def update_settings_from_args(args):
     """Update global settings based on command line arguments"""
     global MAX_SPEED, USE_MIXED_PRECISION, USE_GPU_FOR_INFERENCE
     global USE_PIN_MEMORY, USE_ASYNC_SAVE, SAVE_INTERVAL, BATCH_SIZE
-    global PPO_EPOCHS, device
+    global PPO_EPOCHS, device, TIME_SCALE, FRAME_SKIP, BATCH_UPDATE_FREQUENCY
 
     # Only update if explicitly provided
     if args.max_speed is not None:
@@ -231,6 +236,19 @@ def update_settings_from_args(args):
         print("Forcing CPU usage despite GPU availability")
         device = torch.device("cpu")
 
+    # Add new parameters
+    if args.time_scale is not None:
+        TIME_SCALE = args.time_scale
+        print(f"Using time scale: {TIME_SCALE}x (simulation acceleration)")
+
+    if args.frame_skip is not None:
+        FRAME_SKIP = args.frame_skip
+        print(f"Using frame skip: {FRAME_SKIP} (process 1 of every {FRAME_SKIP} frames)")
+
+    if args.batch_update_freq is not None:
+        BATCH_UPDATE_FREQUENCY = args.batch_update_freq
+        print(f"Using batch update frequency: {BATCH_UPDATE_FREQUENCY} steps")
+
 
 # Print the auto-detected settings
 def print_current_settings():
@@ -247,6 +265,9 @@ def print_current_settings():
     print(f"Pin Memory: {USE_PIN_MEMORY}")
     print(f"GPU for Inference: {USE_GPU_FOR_INFERENCE}")
     print(f"Async Save: {USE_ASYNC_SAVE}")
+    print(f"Time Scale: {TIME_SCALE}x")
+    print(f"Frame Skip: {FRAME_SKIP}")
+    print(f"Batch Update Frequency: {BATCH_UPDATE_FREQUENCY} steps")
     if GPU_INFO:
         print(f"GPU: {GPU_INFO['name']}, VRAM: {GPU_INFO['vram_gb']:.2f} GB")
     print("===========================\n")

@@ -11,7 +11,7 @@ import torch
 from config import (MAX_SPEED, running, save_queue,
                     USE_MIXED_PRECISION, USE_GPU_FOR_INFERENCE,
                     hw_settings, update_settings_from_args,
-                    print_current_settings)
+                    print_current_settings, TIME_SCALE, FRAME_SKIP, BATCH_UPDATE_FREQUENCY)
 from training import training_thread
 from visualization import combined_rendering_thread, rendering_thread, dashboard_thread
 
@@ -80,6 +80,14 @@ def main():
                         help=f'Save model every N episodes (auto-detected: {hw_settings["save_interval"]})')
     parser.add_argument('--ppo_epochs', type=int, default=None,
                         help=f'Number of PPO epochs per update (auto-detected: {hw_settings["ppo_epochs"]})')
+
+    # Training acceleration parameters
+    parser.add_argument('--time_scale', type=float, default=1.0,
+                        help='Time scaling factor to accelerate training (higher = faster, default: 1.0)')
+    parser.add_argument('--frame_skip', type=int, default=1,
+                        help='Number of frames to skip for each processed frame (higher = faster, default: 1)')
+    parser.add_argument('--batch_update_freq', type=int, default=None,
+                        help=f'Update model every N steps (default: {BATCH_UPDATE_FREQUENCY})')
 
     # Visualization options
     parser.add_argument('--no_gui', action='store_true',

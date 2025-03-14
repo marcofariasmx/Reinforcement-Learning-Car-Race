@@ -389,25 +389,11 @@ class CarEnv:
         self.last_progress = 0
         return self.car.get_state()
 
-    def step(self, action):
-        """Take a step in the environment with optimized reward calculation"""
-        # Apply action (acceleration, steering)
-        self.car.acceleration = action[0] * 2  # Scale action to reasonable acceleration
-        self.car.steering = action[1]
-
-        # Update car
-        alive = self.car.update(self.walls)
-        self.steps += 1
-
-        # Initialize reward (no default time penalty)
-        reward = 0.0
-
-        # Check if car has reached a checkpoint
-        checkpoint_reached = self.car.check_checkpoint(self.checkpoints)
-
-        # Get the next checkpoint and calculate direction to it
-        next_checkpoint_idx = self.car.checkpoint_idx
-        next_checkpoint = self.checkpoints[next_checkpoint_idx]
+    def _calculate_alignment(self, next_checkpoint=None):
+        """Calculate car's alignment with the next checkpoint vector"""
+        if next_checkpoint is None:
+            next_checkpoint_idx = self.car.checkpoint_idx
+            next_checkpoint = self.checkpoints[next_checkpoint_idx]
 
         # Calculate vector from car to next checkpoint
         dx = next_checkpoint[0] - self.car.x
@@ -427,72 +413,120 @@ class CarEnv:
         else:
             direction_alignment = 1  # Prevent division by zero
 
+        return direction_alignment
+
+    def _calculate_reward(self, alive, checkpoint_reached):
+        """Calculate reward for the current step"""
+        reward = 0.0
+
+        # Get the next checkpoint
+        next_checkpoint_idx = self.car.checkpoint_idx
+        next_checkpoint = self.checkpoints[next_checkpoint_idx]
+
+        # Calculate vector from car to next checkpoint
+        dx = next_checkpoint[0] - self.car.x
+        dy = next_checkpoint[1] - self.car.y
+        distance_to_checkpoint = math.sqrt(dx * dx + dy * dy)
+
+        # Calculate alignment with checkpoint
+        direction_alignment = self._calculate_alignment(next_checkpoint)
+
         # Calculate reward
         if not alive:
             # Penalize crashing, but scale based on progress
-            # Cars that crash after making substantial progress should be penalized less
-            progress_factor = min(1.0, self.car.total_distance / 500)  # Normalize progress up to 500 distance units
-            crash_penalty = -5.0 * (1.0 - progress_factor)  # Penalty ranges from -5 to 0 based on progress
+            progress_factor = min(1.0, self.car.total_distance / 500)
+            crash_penalty = -5.0 * (1.0 - progress_factor)
             reward += crash_penalty
-            self.done = True
-        elif self.steps >= self.max_steps:
-            # Timeout - mild penalty
-            reward += -2.0
-            self.done = True
         elif checkpoint_reached:
             # Significantly reward checkpoint progress
-            checkpoint_reward = 20.0  # Base reward for reaching any checkpoint
+            checkpoint_reward = 20.0
             reward += checkpoint_reward
 
-            # Add a modest time bonus, but not so large that it dominates
-            # This still rewards faster completion but won't overshadow checkpoint progress
+            # Add a modest time bonus
             time_to_checkpoint = self.steps - self.prev_checkpoint_time
             self.prev_checkpoint_time = self.steps
-
-            # Cap the time bonus to avoid excessive punishment for exploration
-            speed_bonus = 10.0 / max(10, time_to_checkpoint) * 10  # Cap bonus between 0 and 10
+            speed_bonus = 10.0 / max(10, time_to_checkpoint) * 10
             reward += speed_bonus
 
             # Extra reward for completing a lap
             if self.car.checkpoint_idx == 0:
-                reward += 100.0  # Increased from 50 to make lap completion more significant
+                reward += 100.0
         else:
             # Reward for making forward progress toward next checkpoint
             progress = self.car.total_distance
             progress_diff = progress - self.last_progress
             self.last_progress = progress
 
-            # Increase progress reward significantly
             if progress_diff > 0:
                 # Multiply by alignment to reward moving toward checkpoint
-                reward += progress_diff * 0.5 * max(0, direction_alignment)  # Increased from 0.1 to 0.5
+                reward += progress_diff * 0.5 * max(0, direction_alignment)
 
             # Smaller penalty for very slow movement or reversing
             if progress_diff < 0.01:
-                reward -= 0.05  # Reduced from 0.1
+                reward -= 0.05
 
             # Increase alignment reward
-            reward += direction_alignment * 0.05  # Increased from 0.01
+            reward += direction_alignment * 0.05
 
             # Reward smooth driving (less steering changes)
             smoothness = 1.0 - min(1.0, abs(self.car.steering) * 2)
-            reward += smoothness * 0.05  # Increased from 0.01
+            reward += smoothness * 0.05
 
-            # Increased proximity reward for approaching checkpoint
-            reward += 0.5 / max(10, distance_to_checkpoint)  # Increased from 0.01
+            # Proximity reward for approaching checkpoint
+            reward += 0.5 / max(10, distance_to_checkpoint)
 
-        self.reward = reward
-        self.total_reward += reward
+        return reward
+
+    def step(self, action, time_scale=1.0, frame_skip=1):
+        """Take a step in the environment with time scaling and frame skipping"""
+        # Apply action (acceleration, steering)
+        self.car.acceleration = action[0] * 2  # Scale action to reasonable acceleration
+        self.car.steering = action[1]
+
+        # Apply multiple physics steps for time scaling
+        alive = True
+        cumulative_reward = 0
+
+        # Execute multiple physics steps based on time_scale * frame_skip
+        # We'll only process every frame_skip steps for training, but simulate all steps
+        for i in range(int(time_scale * frame_skip)):
+            # Update car physics
+            alive = self.car.update(self.walls)
+            self.steps += 1
+
+            # Check if car has reached a checkpoint
+            checkpoint_reached = self.car.check_checkpoint(self.checkpoints)
+
+            # Calculate reward for this physics step
+            step_reward = self._calculate_reward(alive, checkpoint_reached)
+            cumulative_reward += step_reward
+
+            # Check if episode is done
+            if not alive or self.steps >= self.max_steps:
+                self.done = True
+                break
+
+        # Get the current state
+        next_state = self.car.get_state()
+
+        # Scale reward based on time acceleration to maintain learning signal
+        # Scale slightly less than linear to avoid overestimation
+        reward_scale = math.sqrt(time_scale * frame_skip)  # Square root provides a more balanced scaling
+        scaled_reward = cumulative_reward * reward_scale
 
         # Return next state, reward, done flag, and info
-        next_state = self.car.get_state()
         info = {
             'laps': self.car.laps_completed,
             'checkpoints': self.car.checkpoint_idx,
             'distance': self.car.total_distance,
             'speed': self.car.speed,
             'steps': self.steps,
-            'direction_alignment': direction_alignment
+            'direction_alignment': self._calculate_alignment(),
+            'time_scale': time_scale,
+            'frame_skip': frame_skip
         }
 
-        return next_state, reward, self.done, info
+        self.reward = scaled_reward
+        self.total_reward += scaled_reward
+
+        return next_state, scaled_reward, self.done, info

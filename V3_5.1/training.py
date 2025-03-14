@@ -7,7 +7,8 @@ import copy
 import threading
 
 from config import (data_lock, metrics_lock, frame_data, metrics_data, running,
-                    MAX_EPISODES, BATCH_SIZE, device, frame_buffer, SAVE_INTERVAL)
+                    MAX_EPISODES, BATCH_SIZE, device, frame_buffer, SAVE_INTERVAL,
+                    TIME_SCALE, FRAME_SKIP, BATCH_UPDATE_FREQUENCY)
 from models import PPOAgent
 from environment import CarEnv
 
@@ -24,6 +25,12 @@ def training_thread():
 
     # Load model if exists
     model_loaded = agent.load()
+
+    # Get training acceleration parameters
+    time_scale = TIME_SCALE
+    frame_skip = FRAME_SKIP
+    batch_update_frequency = BATCH_UPDATE_FREQUENCY
+    steps_since_update = 0
 
     # Use the episode count from the loaded model
     start_episode = agent.episode_count if model_loaded else 0
@@ -122,8 +129,8 @@ def training_thread():
                 # Regular action selection
                 action, log_prob = agent.select_action(state)
 
-            # Execute action
-            next_state, reward, done, info = env.step(action)
+            # Execute action with time scaling and frame skipping
+            next_state, reward, done, info = env.step(action, time_scale=time_scale, frame_skip=frame_skip)
 
             # Track actions and rewards for this step
             episode_actions.append(action.tolist())
@@ -144,51 +151,53 @@ def training_thread():
             episode_reward += reward
             steps += 1
 
-            # Prepare visualization data - create deep copies to avoid reference issues
-            if steps % 2 == 0 or done:  # Reduce frame updates to every 2nd step to lower overhead
+            # Prepare visualization data - reduce frame updates based on frame skip to lower overhead
+            if steps % (2 * frame_skip) == 0 or done:
                 frame_snapshot = {
-                    'car': copy.deepcopy(env.car),  # Make copies to avoid reference issues
-                    'walls': env.walls,  # Walls and checkpoints don't change often
+                    'car': copy.deepcopy(env.car),
+                    'walls': env.walls,
                     'checkpoints': env.checkpoints,
                     'reward': reward,
                     'total_reward': episode_reward,
                     'laps': env.car.laps_completed,
                     'episode': episode,
-                    'steps': steps,  # Include steps in frame data
-                    'info': info.copy() if info else {}
+                    'steps': steps,
+                    'info': info.copy() if info else {},
+                    'time_scale': time_scale,  # Add time scale to frame data
+                    'frame_skip': frame_skip  # Add frame skip to frame data
                 }
 
                 # Try to update frame buffer without blocking
                 try:
-                    # Keep the frame buffer updated without blocking
                     if frame_buffer.full():
                         try:
-                            frame_buffer.get_nowait()  # Remove oldest frame
+                            frame_buffer.get_nowait()
                         except Exception:
-                            pass  # Ignore if buffer was emptied by another thread
+                            pass
                     frame_buffer.put_nowait(frame_snapshot)
                 except Exception:
-                    pass  # Never block training for visualization
+                    pass
 
-            # Update agent periodically - adjust frequency based on performance
-            if len(agent.trajectory) >= BATCH_SIZE or done:
+            # Update agent based on steps since last update rather than just trajectory length
+            steps_since_update += 1
+
+            # Update when we reach batch_update_frequency steps or when episode ends
+            if steps_since_update >= batch_update_frequency or done or len(agent.trajectory) >= BATCH_SIZE:
                 # Start timing for neural network update
                 nn_update_start = time.time()
 
-                # Calculate last value before updating
+                # Calculate last value for bootstrapping
                 if done:
                     last_value = 0
                 else:
                     with torch.no_grad():
                         if agent.use_cpu_for_inference:
-                            # Faster inference on CPU for single sample
                             next_state_tensor = torch.FloatTensor(next_state).unsqueeze(0)
                             agent.cpu_actor_critic.eval()
                             _, _, last_value = agent.cpu_actor_critic(next_state_tensor)
                             agent.cpu_actor_critic.train()
                             last_value = last_value.numpy()
                         else:
-                            # GPU inference
                             next_state_tensor = torch.FloatTensor(next_state).to(device).unsqueeze(0)
                             agent.actor_critic.eval()
                             _, _, last_value = agent.actor_critic(next_state_tensor)
@@ -198,58 +207,63 @@ def training_thread():
                         if isinstance(last_value, np.ndarray):
                             last_value = float(last_value.item())
 
-                # End trajectory and perform update (potentially expensive operation)
-                agent.end_trajectory(last_value)
-                total_loss, actor_loss, critic_loss, entropy_loss = agent.update()
+                # End trajectory and perform update (only if we have enough data)
+                if len(agent.trajectory) > 0:
+                    agent.end_trajectory(last_value)
 
-                # Record neural network update time
-                nn_update_time = time.time() - nn_update_start
-                nn_update_count += 1
-                avg_nn_update_time = avg_nn_update_time * 0.9 + nn_update_time * 0.1  # Exponential moving avg
-                update_times.append(nn_update_time)
+                    if len(agent.memory) >= BATCH_SIZE:
+                        total_loss, actor_loss, critic_loss, entropy_loss = agent.update()
+                        # Reset update counter after successful update
+                        steps_since_update = 0
 
-                # Calculate time since last update for metrics
-                time_since_last_update = time.time() - last_nn_update_time
-                last_nn_update_time = time.time()
+                        # Record neural network update time
+                        nn_update_time = time.time() - nn_update_start
+                        nn_update_count += 1
+                        avg_nn_update_time = avg_nn_update_time * 0.9 + nn_update_time * 0.1  # Exponential moving avg
+                        update_times.append(nn_update_time)
 
-                # Store loss history for plotting - only if we actually did an update
-                if total_loss > 0:  # Only store non-zero losses
-                    total_loss_history.append(total_loss)
-                    actor_loss_history.append(actor_loss)
-                    critic_loss_history.append(critic_loss)
-                    entropy_loss_history.append(entropy_loss)
+                        # Calculate time since last update for metrics
+                        time_since_last_update = time.time() - last_nn_update_time
+                        last_nn_update_time = time.time()
 
-                    # Keep history limited to a reasonable size for plotting
-                    max_loss_history = 1000
-                    if len(total_loss_history) > max_loss_history:
-                        total_loss_history = total_loss_history[-max_loss_history:]
-                        actor_loss_history = actor_loss_history[-max_loss_history:]
-                        critic_loss_history = critic_loss_history[-max_loss_history:]
-                        entropy_loss_history = entropy_loss_history[-max_loss_history:]
+                        # Store loss history for plotting - only if we actually did an update
+                        if total_loss > 0:  # Only store non-zero losses
+                            total_loss_history.append(total_loss)
+                            actor_loss_history.append(actor_loss)
+                            critic_loss_history.append(critic_loss)
+                            entropy_loss_history.append(entropy_loss)
 
-                # Prepare metrics data outside the lock
-                local_metrics = {
-                    'last_loss': total_loss,
-                    'actor_loss': actor_loss,
-                    'critic_loss': critic_loss,
-                    'entropy_loss': entropy_loss,
-                    'recent_actions': episode_actions[-20:] if episode_actions else [],
-                    'recent_rewards': episode_step_rewards[-100:] if episode_step_rewards else [],
-                    'memory_usage': len(agent.memory),
-                    'updates_performed': metrics_data['updates_performed'] + 1,
-                    'training_step': metrics_data['training_step'] + 1,
-                    'nn_update_time': nn_update_time,
-                    'avg_nn_update_time': np.mean(update_times) if update_times else 0,
-                    'time_between_updates': time_since_last_update,
-                    'loss_history': total_loss_history,
-                    'actor_loss_history': actor_loss_history,
-                    'critic_loss_history': critic_loss_history,
-                    'entropy_loss_history': entropy_loss_history
-                }
+                            # Keep history limited to a reasonable size for plotting
+                            max_loss_history = 1000
+                            if len(total_loss_history) > max_loss_history:
+                                total_loss_history = total_loss_history[-max_loss_history:]
+                                actor_loss_history = actor_loss_history[-max_loss_history:]
+                                critic_loss_history = critic_loss_history[-max_loss_history:]
+                                entropy_loss_history = entropy_loss_history[-max_loss_history:]
 
-                # Update metrics data with minimal lock time
-                with metrics_lock:
-                    metrics_data.update(local_metrics)
+                        # Prepare metrics data outside the lock
+                        local_metrics = {
+                            'last_loss': total_loss,
+                            'actor_loss': actor_loss,
+                            'critic_loss': critic_loss,
+                            'entropy_loss': entropy_loss,
+                            'recent_actions': episode_actions[-20:] if episode_actions else [],
+                            'recent_rewards': episode_step_rewards[-100:] if episode_step_rewards else [],
+                            'memory_usage': len(agent.memory),
+                            'updates_performed': metrics_data['updates_performed'] + 1,
+                            'training_step': metrics_data['training_step'] + 1,
+                            'nn_update_time': nn_update_time,
+                            'avg_nn_update_time': np.mean(update_times) if update_times else 0,
+                            'time_between_updates': time_since_last_update,
+                            'loss_history': total_loss_history,
+                            'actor_loss_history': actor_loss_history,
+                            'critic_loss_history': critic_loss_history,
+                            'entropy_loss_history': entropy_loss_history
+                        }
+
+                        # Update metrics data with minimal lock time
+                        with metrics_lock:
+                            metrics_data.update(local_metrics)
 
         # End of episode - update agent's episode tracking
         agent.end_episode(episode_reward)
@@ -297,7 +311,7 @@ def training_thread():
             current_lr = agent.scheduler.get_last_lr()[0]
             print(f"Episode {episode}: Reward = {episode_reward:.2f}, Avg Reward = {np.mean(recent_rewards):.2f}, "
                   f"Laps = {env.car.laps_completed}, Steps = {steps}, LR = {current_lr:.6f}, "
-                  f"NN Update Time = {avg_nn_update_time:.4f}s")
+                  f"NN Update Time = {avg_nn_update_time:.4f}s, Time Scale = {time_scale:.1f}x")
 
         # Save model periodically using improved async save
         if episode > 0 and episode % SAVE_INTERVAL == 0:
