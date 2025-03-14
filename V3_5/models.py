@@ -146,7 +146,8 @@ class PPOAgent:
         # Setup for mixed precision training
         self.use_mixed_precision = device.type == 'cuda' and USE_MIXED_PRECISION
         if self.use_mixed_precision:
-            self.scaler = torch.cuda.amp.GradScaler()
+            # FIX: Use the updated PyTorch syntax for GradScaler
+            self.scaler = torch.amp.GradScaler('cuda')
             print("Using mixed precision training for better GPU performance")
 
         self.state_dim = state_dim
@@ -344,8 +345,8 @@ class PPOAgent:
         # Multiple epochs of PPO update - use mixed precision if available
         for _ in range(PPO_EPOCHS):
             if self.use_mixed_precision:
-                # Mixed precision training path
-                with torch.cuda.amp.autocast():
+                # Mixed precision training path - with fixed PyTorch syntax
+                with torch.amp.autocast('cuda'):
                     # Evaluate actions and calculate ratio
                     log_probs, values, entropy = self.actor_critic.evaluate(states_tensor, actions_tensor)
 
@@ -449,14 +450,16 @@ class PPOAgent:
                     pass
 
     def save(self, filename="ppo_car_model.pth"):
-        """Save model with optimized async approach to prevent freezing"""
+        """Save model with optimized async approach to prevent freezing and ensure training time is saved"""
         # Calculate current session training time
         current_session_time = time.time() - metrics_data['start_time']
 
-        # Update total training time
+        # Get current total training time first
         with metrics_lock:
-            metrics_data['total_training_time'] += current_session_time
-            total_training_time = metrics_data['total_training_time']
+            total_training_time = metrics_data['total_training_time'] + current_session_time
+
+            # Important: Update the metrics_data with the new total
+            metrics_data['total_training_time'] = total_training_time
 
             # Reset start time for next session
             metrics_data['start_time'] = time.time()
@@ -467,7 +470,7 @@ class PPOAgent:
                 'episode_lengths': metrics_data['episode_lengths'].copy() if metrics_data['episode_lengths'] else [],
                 'episode_laps': metrics_data['episode_laps'].copy() if metrics_data['episode_laps'] else [],
                 'avg_rewards': metrics_data['avg_rewards'].copy() if metrics_data['avg_rewards'] else [],
-                'total_training_time': total_training_time
+                'total_training_time': total_training_time  # Include this in both places for backwards compatibility
             }
 
         # Create a save dictionary with deep copies to avoid reference issues
@@ -478,9 +481,12 @@ class PPOAgent:
             'episode_count': self.episode_count,
             'cumulative_rewards': self.cumulative_rewards.copy(),
             'training_metrics': current_metrics,
+            'total_training_time': total_training_time,  # Save it at the top level too for robustness
             'total_episodes_trained': len(metrics_data['episode_rewards']) if metrics_data['episode_rewards'] else 0,
             'save_time': time.time()
         }
+
+        print(f"Saving model with total training time: {self.format_time(total_training_time)}")
 
         if USE_ASYNC_SAVE:
             try:
@@ -495,6 +501,7 @@ class PPOAgent:
         else:
             # Synchronous save
             torch.save(save_dict, filename)
+            print(f"Model saved synchronously to {filename}")
 
         # Format the time for display
         total_time_str = self.format_time(total_training_time)
@@ -502,12 +509,17 @@ class PPOAgent:
             f"Model save requested for {filename} (Episodes trained: {self.episode_count}, Total training time: {total_time_str})")
 
     def load(self, filename="ppo_car_model.pth"):
-        """Load model with improved error handling"""
+        """Load model with improved error handling and training time preservation"""
         if os.path.isfile(filename):
             try:
-                # Try with default settings first
-                print(f"Loading model from {filename}...")
-                checkpoint = torch.load(filename, map_location=device)
+                # Try with weights_only=False first since we know this is likely to work with older models
+                print(f"Loading model from {filename} with compatibility mode...")
+                checkpoint = torch.load(filename, map_location=device, weights_only=False)
+
+                # Debug: print all keys in the checkpoint
+                print(f"Checkpoint contains keys: {list(checkpoint.keys())}")
+                if 'training_metrics' in checkpoint:
+                    print(f"Training metrics contains keys: {list(checkpoint['training_metrics'].keys())}")
 
                 # Load model state dict
                 self.actor_critic.load_state_dict(checkpoint['actor_critic_state_dict'])
@@ -519,18 +531,32 @@ class PPOAgent:
                 # Load optimizer state
                 self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
+                # Load scheduler if available
                 if 'scheduler_state_dict' in checkpoint:
                     self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
 
+                # Load episode count
                 if 'episode_count' in checkpoint:
                     self.episode_count = checkpoint['episode_count']
 
+                # Load rewards history
                 if 'cumulative_rewards' in checkpoint:
                     self.cumulative_rewards = checkpoint['cumulative_rewards']
 
+                # IMPORTANT: Load total training time and ensure it's preserved
+                loaded_total_time = 0
+
+                # Load from different possible locations in the checkpoint
+                if 'training_metrics' in checkpoint and 'total_training_time' in checkpoint['training_metrics']:
+                    loaded_total_time = checkpoint['training_metrics']['total_training_time']
+                    print(f"Loaded total training time from metrics: {self.format_time(loaded_total_time)}")
+                elif 'total_training_time' in checkpoint:
+                    loaded_total_time = checkpoint['total_training_time']
+                    print(f"Loaded total training time directly: {self.format_time(loaded_total_time)}")
+
                 # Load saved metrics if available
-                if 'training_metrics' in checkpoint:
-                    with metrics_lock:
+                with metrics_lock:
+                    if 'training_metrics' in checkpoint:
                         if 'episode_rewards' in checkpoint['training_metrics']:
                             metrics_data['episode_rewards'] = checkpoint['training_metrics']['episode_rewards']
                         if 'episode_lengths' in checkpoint['training_metrics']:
@@ -539,8 +565,16 @@ class PPOAgent:
                             metrics_data['episode_laps'] = checkpoint['training_metrics']['episode_laps']
                         if 'avg_rewards' in checkpoint['training_metrics']:
                             metrics_data['avg_rewards'] = checkpoint['training_metrics']['avg_rewards']
-                        if 'total_training_time' in checkpoint['training_metrics']:
-                            metrics_data['total_training_time'] = checkpoint['training_metrics']['total_training_time']
+
+                    # VERY IMPORTANT: Explicitly set the total training time from what we loaded
+                    if loaded_total_time > 0:
+                        metrics_data['total_training_time'] = loaded_total_time
+                        print(f"Successfully restored total training time: {self.format_time(loaded_total_time)}")
+                    else:
+                        # If no training time found, estimate it based on episode count
+                        estimated_time = self.episode_count * 10  # Assume 10 seconds per episode as a rough estimate
+                        metrics_data['total_training_time'] = estimated_time
+                        print(f"No training time found, using estimate: {self.format_time(estimated_time)}")
 
                 # Display info about the loaded model
                 total_episodes = checkpoint.get('total_episodes_trained', self.episode_count)
@@ -556,41 +590,16 @@ class PPOAgent:
                 print(f"Episodes trained: {total_episodes}")
                 print(f"Total training time: {total_time_str}")
                 print(f"Last saved: {save_time_str}")
+
+                # Reset start time to avoid double-counting
+                metrics_data['start_time'] = time.time()
+
                 return True
 
             except Exception as e:
-                print(f"Error with default load settings: {e}")
-                print("Attempting to load with weights_only=False for backwards compatibility...")
-                try:
-                    # Use weights_only=False for backward compatibility with older PyTorch versions
-                    checkpoint = torch.load(filename, map_location=device, weights_only=False)
-
-                    # Continue with loading as above...
-                    self.actor_critic.load_state_dict(checkpoint['actor_critic_state_dict'])
-
-                    if self.use_cpu_for_inference:
-                        self.cpu_actor_critic.load_state_dict(checkpoint['actor_critic_state_dict'])
-
-                    self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-                    # Rest of loading code...
-                    if 'scheduler_state_dict' in checkpoint:
-                        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-
-                    if 'episode_count' in checkpoint:
-                        self.episode_count = checkpoint['episode_count']
-
-                    if 'cumulative_rewards' in checkpoint:
-                        self.cumulative_rewards = checkpoint['cumulative_rewards']
-
-                    # Display success message
-                    print(f"Model loaded successfully with compatibility mode")
-                    return True
-
-                except Exception as nested_e:
-                    print(f"Failed to load model with compatibility mode: {nested_e}")
-                    print("Using a new model")
-                    return False
+                print(f"Error loading model: {e}")
+                print("Loading failed, starting with a new model")
+                return False
         else:
             print(f"No model file found at {filename}, starting with a new model")
         return False

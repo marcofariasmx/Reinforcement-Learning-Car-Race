@@ -35,6 +35,25 @@ if 'DISPLAY' not in os.environ and platform.system() == 'Linux':
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
+
+# Helper function to check for mixed precision support
+def check_mixed_precision_support():
+    """Check if mixed precision training is supported with proper version detection"""
+    if not torch.cuda.is_available():
+        return False
+
+    # Check if we have the newer torch.amp API
+    if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast'):
+        return True
+
+    # Check for older torch.cuda.amp API (deprecated but functional)
+    if hasattr(torch.cuda, 'amp') and hasattr(torch.cuda.amp, 'autocast'):
+        print("Warning: Using deprecated torch.cuda.amp API. Consider updating PyTorch.")
+        return True
+
+    return False
+
+
 # Constants (not hardware-dependent)
 SCREEN_WIDTH = 1000
 SCREEN_HEIGHT = 800
@@ -64,6 +83,9 @@ def detect_hardware_capabilities():
     gpu_available = torch.cuda.is_available()
     cpu_count = os.cpu_count() or 1
 
+    # Check for mixed precision support
+    mixed_precision_supported = check_mixed_precision_support()
+
     gpu_info = {}
 
     if gpu_available:
@@ -81,6 +103,7 @@ def detect_hardware_capabilities():
             }
 
             print(f"GPU: {gpu_name}, Compute: {gpu_compute_capability}, VRAM: {vram_gb:.2f} GB")
+            print(f"Mixed precision support: {mixed_precision_supported}")
 
             # Adaptive settings based on GPU
             if vram_gb > 6.0:  # High-end GPU
@@ -91,7 +114,7 @@ def detect_hardware_capabilities():
                     'learning_rate': 3e-4,
                     'ppo_epochs': 10,
                     'save_interval': 50,
-                    'use_mixed_precision': True,
+                    'use_mixed_precision': mixed_precision_supported,
                     'use_pin_memory': True,
                     'use_gpu_for_inference': False,  # Still better to use CPU for small inference batches
                     'gpu_info': gpu_info,
@@ -105,7 +128,7 @@ def detect_hardware_capabilities():
                     'learning_rate': 3e-4,
                     'ppo_epochs': 5,
                     'save_interval': 25,
-                    'use_mixed_precision': False,
+                    'use_mixed_precision': mixed_precision_supported,
                     'use_pin_memory': True,
                     'use_gpu_for_inference': False,  # Use CPU for inference to avoid small transfers
                     'gpu_info': gpu_info,
@@ -190,7 +213,7 @@ def update_settings_from_args(args):
         USE_GPU_FOR_INFERENCE = False
         print("Disabled GPU for inference")
 
-    if args.mixed_precision and torch.cuda.is_available() and hasattr(torch.cuda, 'amp'):
+    if args.mixed_precision and check_mixed_precision_support():
         USE_MIXED_PRECISION = True
         print("Enabled mixed precision training")
     elif args.no_mixed_precision:
@@ -207,6 +230,26 @@ def update_settings_from_args(args):
     if args.cpu and torch.cuda.is_available():
         print("Forcing CPU usage despite GPU availability")
         device = torch.device("cpu")
+
+
+# Print the auto-detected settings
+def print_current_settings():
+    """Print all the current settings in a readable format"""
+    print("\n===== Current Settings =====")
+    print(f"Device: {device}")
+    print(f"Batch Size: {BATCH_SIZE}")
+    print(f"Memory Size: {MEMORY_SIZE}")
+    print(f"Learning Rate: {LEARNING_RATE}")
+    print(f"Max Speed: {MAX_SPEED}")
+    print(f"PPO Epochs: {PPO_EPOCHS}")
+    print(f"Save Interval: {SAVE_INTERVAL}")
+    print(f"Mixed Precision: {USE_MIXED_PRECISION}")
+    print(f"Pin Memory: {USE_PIN_MEMORY}")
+    print(f"GPU for Inference: {USE_GPU_FOR_INFERENCE}")
+    print(f"Async Save: {USE_ASYNC_SAVE}")
+    if GPU_INFO:
+        print(f"GPU: {GPU_INFO['name']}, VRAM: {GPU_INFO['vram_gb']:.2f} GB")
+    print("===========================\n")
 
 
 # Global variables for communication between threads
@@ -257,27 +300,6 @@ metrics_data = {
     'time_between_updates': 0,  # Time between neural network updates
     'transfer_time': 0,  # Time for CPU-GPU transfers
 }
-
-
-# Print the auto-detected settings
-def print_current_settings():
-    """Print all the current settings in a readable format"""
-    print("\n===== Current Settings =====")
-    print(f"Device: {device}")
-    print(f"Batch Size: {BATCH_SIZE}")
-    print(f"Memory Size: {MEMORY_SIZE}")
-    print(f"Learning Rate: {LEARNING_RATE}")
-    print(f"Max Speed: {MAX_SPEED}")
-    print(f"PPO Epochs: {PPO_EPOCHS}")
-    print(f"Save Interval: {SAVE_INTERVAL}")
-    print(f"Mixed Precision: {USE_MIXED_PRECISION}")
-    print(f"Pin Memory: {USE_PIN_MEMORY}")
-    print(f"GPU for Inference: {USE_GPU_FOR_INFERENCE}")
-    print(f"Async Save: {USE_ASYNC_SAVE}")
-    if GPU_INFO:
-        print(f"GPU: {GPU_INFO['name']}, VRAM: {GPU_INFO['vram_gb']:.2f} GB")
-    print("===========================\n")
-
 
 data_lock = threading.Lock()
 metrics_lock = threading.Lock()  # Separate lock for metrics to reduce contention

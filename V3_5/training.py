@@ -253,7 +253,7 @@ def training_thread():
 
         # Save model periodically using improved async save
         if episode > 0 and episode % SAVE_INTERVAL == 0:
-            agent.save(f"ppo_car_model_ep{episode}.pth")
+            agent.save(f"ppo_car_model.pth")
 
     # Save final model
     agent.save("ppo_car_model_final.pth")
