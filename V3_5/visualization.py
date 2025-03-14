@@ -452,31 +452,54 @@ def combined_rendering_thread():
                                                  (section['rect'].x + 200, section['rect'].y + 30 + i * 18))
 
                     elif section_id == 'episode_stats':
-                        # Current episode statistics in two columns
+
+                        # Current episode statistics in two columns with added step count
+
                         col1_stats = [
+
                             f"Episode: {current_frame.get('episode', 0)}",
+
+                            f"Steps: {current_frame.get('steps', 0)}",  # Added steps count
+
                             f"Reward: {current_frame.get('reward', 0):.2f}",
+
                             f"Total Reward: {current_frame.get('total_reward', 0):.2f}",
+
                             f"Laps: {current_frame.get('laps', 0)}"
+
                         ]
 
                         col2_stats = [
+
                             f"LR: {current_metrics.get('learning_rate', 0):.6f}",
+
                             f"Entropy: {current_metrics.get('entropy_coef', 0):.4f}",
+
                             f"Loss: {current_metrics.get('last_loss', 0):.4f}",
-                            f"A/C Loss: {current_metrics.get('actor_loss', 0):.2f}/{current_metrics.get('critic_loss', 0):.2f}"
+
+                            f"A/C Loss: {current_metrics.get('actor_loss', 0):.2f}/{current_metrics.get('critic_loss', 0):.2f}",
+
+                            f"Update Time: {current_metrics.get('avg_nn_update_time', 0) * 1000:.1f}ms"
+                            # Display nn update time in ms
+
                         ]
 
                         # Column 1
+
                         for i, stat in enumerate(col1_stats):
                             stat_surface = regular_font.render(stat, True, WHITE)
+
                             combined_screen.blit(stat_surface,
+
                                                  (section['rect'].x + 15, section['rect'].y + 30 + i * 18))
 
                         # Column 2
+
                         for i, stat in enumerate(col2_stats):
                             stat_surface = regular_font.render(stat, True, WHITE)
+
                             combined_screen.blit(stat_surface,
+
                                                  (section['rect'].x + 200, section['rect'].y + 30 + i * 18))
 
                     elif section_id == 'reward_plot':
@@ -500,116 +523,232 @@ def combined_rendering_thread():
                                            color=GREEN, label="Episode Reward")
 
                     elif section_id == 'loss_plot':
+
                         # Loss history
+
                         plot_rect = pygame.Rect(section['rect'].x + 10, section['rect'].y + 30,
+
                                                 section['rect'].width - 20, section['rect'].height - 40)
 
                         # Draw actor and critic loss if available
-                        if hasattr(current_metrics, 'actor_loss_history'):
-                            draw_line_plot(combined_screen, plot_rect, current_metrics['actor_loss_history'][-100:],
-                                           color=RED, label="Actor Loss")
-                            draw_line_plot(combined_screen, plot_rect, current_metrics['critic_loss_history'][-100:],
-                                           color=BLUE, label="Critic Loss")
+
+                        if current_metrics.get('loss_history', []):
+
+                            # Get loss history data
+
+                            loss_history = current_metrics.get('loss_history', [])
+
+                            actor_loss_history = current_metrics.get('actor_loss_history', [])
+
+                            critic_loss_history = current_metrics.get('critic_loss_history', [])
+
+                            # Downsample if too many points
+
+                            if len(loss_history) > max_plot_points:
+                                downsample_factor = max(1, len(loss_history) // max_plot_points)
+
+                                loss_history = loss_history[::downsample_factor]
+
+                            if len(actor_loss_history) > max_plot_points:
+                                downsample_factor = max(1, len(actor_loss_history) // max_plot_points)
+
+                                actor_loss_history = actor_loss_history[::downsample_factor]
+
+                            if len(critic_loss_history) > max_plot_points:
+                                downsample_factor = max(1, len(critic_loss_history) // max_plot_points)
+
+                                critic_loss_history = critic_loss_history[::downsample_factor]
+
+                            # Draw total loss plot
+
+                            if loss_history:
+                                draw_line_plot(combined_screen, plot_rect, loss_history,
+
+                                               color=YELLOW, label="Total Loss")
+
+                            # Draw actor loss plot
+
+                            if actor_loss_history:
+                                draw_line_plot(combined_screen, plot_rect, actor_loss_history,
+
+                                               color=RED, label="Actor Loss")
+
+                            # Draw critic loss plot
+
+                            if critic_loss_history:
+                                draw_line_plot(combined_screen, plot_rect, critic_loss_history,
+
+                                               color=BLUE, label="Critic Loss")
+
                         else:
+
                             # Draw placeholder
+
                             text = small_font.render("Loss data will appear here as training progresses", True, WHITE)
+
                             combined_screen.blit(text, (plot_rect.x + 10, plot_rect.y + plot_rect.height // 2))
 
+
                     elif section_id == 'action_plot':
+
                         # Improved recent actions plot
+
                         plot_rect = pygame.Rect(section['rect'].x + 10, section['rect'].y + 30,
+
                                                 section['rect'].width - 20, section['rect'].height - 40)
 
-                        # Update action history
+                        # Update action history - more responsive to recent actions
+
                         if current_metrics.get('recent_actions', []):
+
                             # Extract acceleration and steering
+
                             if len(current_metrics['recent_actions']) > 0 and len(
                                     current_metrics['recent_actions'][0]) >= 2:
+
                                 accel_actions = [a[0] for a in current_metrics['recent_actions']]
+
                                 steer_actions = [a[1] for a in current_metrics['recent_actions']]
 
                                 # Add a background rect to separate accel and steering
+
                                 half_height = plot_rect.height // 2
+
                                 upper_rect = pygame.Rect(plot_rect.left, plot_rect.top, plot_rect.width, half_height)
+
                                 lower_rect = pygame.Rect(plot_rect.left, plot_rect.top + half_height, plot_rect.width,
+
                                                          half_height)
 
                                 # Fill background with slight color to distinguish areas
+
                                 pygame.draw.rect(combined_screen, (0, 40, 40), upper_rect)
+
                                 pygame.draw.rect(combined_screen, (40, 0, 40), lower_rect)
 
                                 # Draw zero lines for reference
+
                                 zero_y_accel = upper_rect.top + upper_rect.height // 2
+
                                 zero_y_steer = lower_rect.top + lower_rect.height // 2
 
                                 pygame.draw.line(combined_screen, (100, 100, 100),
+
                                                  (upper_rect.left, zero_y_accel),
+
                                                  (upper_rect.right, zero_y_accel), 1)
+
                                 pygame.draw.line(combined_screen, (100, 100, 100),
+
                                                  (lower_rect.left, zero_y_steer),
+
                                                  (lower_rect.right, zero_y_steer), 1)
 
                                 # Add labels
+
                                 label_font = pygame.font.SysFont('Arial', 12)
+
                                 accel_label = label_font.render("Acceleration (Fwd/Rev)", True, CYAN)
+
                                 steer_label = label_font.render("Steering (Left/Right)", True, PURPLE)
 
                                 combined_screen.blit(accel_label, (upper_rect.left + 5, upper_rect.top + 5))
+
                                 combined_screen.blit(steer_label, (lower_rect.left + 5, lower_rect.top + 5))
 
                                 # Draw points for acceleration in upper half
+
                                 accel_points = []
+
                                 for i, accel in enumerate(accel_actions):
                                     x = upper_rect.left + (i / (
+
                                         len(accel_actions) - 1 if len(accel_actions) > 1 else 1)) * upper_rect.width
+
                                     # Map -1 to 1 range to the upper rect height
+
                                     y = zero_y_accel - (accel * upper_rect.height / 2)
+
                                     accel_points.append((x, y))
 
                                 if len(accel_points) > 1:
                                     pygame.draw.lines(combined_screen, CYAN, False, accel_points, 2)
 
                                 # Draw points for steering in lower half
+
                                 steer_points = []
+
                                 for i, steer in enumerate(steer_actions):
                                     x = lower_rect.left + (i / (
+
                                         len(steer_actions) - 1 if len(steer_actions) > 1 else 1)) * lower_rect.width
+
                                     # Map -1 to 1 range to the lower rect height
+
                                     y = zero_y_steer - (steer * lower_rect.height / 2)
+
                                     steer_points.append((x, y))
 
                                 if len(steer_points) > 1:
                                     pygame.draw.lines(combined_screen, PURPLE, False, steer_points, 2)
 
                                 # Draw the last values
+
                                 if accel_points:
                                     pygame.draw.circle(combined_screen, CYAN,
+
                                                        (int(accel_points[-1][0]), int(accel_points[-1][1])), 4)
+
                                     last_accel = accel_actions[-1]
+
                                     last_accel_label = label_font.render(f"{last_accel:.2f}", True, CYAN)
+
                                     combined_screen.blit(last_accel_label,
+
                                                          (accel_points[-1][0] + 5, accel_points[-1][1] - 10))
 
                                 if steer_points:
                                     pygame.draw.circle(combined_screen, PURPLE,
+
                                                        (int(steer_points[-1][0]), int(steer_points[-1][1])), 4)
+
                                     last_steer = steer_actions[-1]
+
                                     last_steer_label = label_font.render(f"{last_steer:.2f}", True, PURPLE)
+
                                     combined_screen.blit(last_steer_label,
+
                                                          (steer_points[-1][0] + 5, steer_points[-1][1] - 10))
 
                                 # Add explanatory legends
+
                                 small_font = pygame.font.SysFont('Arial', 10)
+
                                 accel_pos = small_font.render("Forward", True, LIGHT_GRAY)
+
                                 accel_neg = small_font.render("Reverse", True, LIGHT_GRAY)
+
                                 steer_pos = small_font.render("Right", True, LIGHT_GRAY)
+
                                 steer_neg = small_font.render("Left", True, LIGHT_GRAY)
 
                                 # Position the legends
+
                                 combined_screen.blit(accel_pos, (upper_rect.left + 5, upper_rect.top + 5))
+
                                 combined_screen.blit(accel_neg, (upper_rect.left + 5, zero_y_accel + 5))
+
                                 combined_screen.blit(steer_pos, (lower_rect.left + 5, lower_rect.top + 5))
+
                                 combined_screen.blit(steer_neg, (lower_rect.left + 5, zero_y_steer + 5))
+
+                        else:
+
+                            # If no action data, show a message
+
+                            text = small_font.render("Action data will appear here as the agent acts", True, WHITE)
+
+                            combined_screen.blit(text, (plot_rect.x + 10, plot_rect.y + plot_rect.height // 2))
 
                     elif section_id == 'avg_reward_plot':
                         # Average reward history plot

@@ -32,6 +32,16 @@ def training_thread():
     with metrics_lock:
         metrics_data['start_episode'] = start_episode
 
+        # Initialize loss history lists if they don't exist
+        if 'loss_history' not in metrics_data:
+            metrics_data['loss_history'] = []
+        if 'actor_loss_history' not in metrics_data:
+            metrics_data['actor_loss_history'] = []
+        if 'critic_loss_history' not in metrics_data:
+            metrics_data['critic_loss_history'] = []
+        if 'entropy_loss_history' not in metrics_data:
+            metrics_data['entropy_loss_history'] = []
+
     # Experience replay warmup - generate some initial experiences
     if not model_loaded and len(agent.memory) < BATCH_SIZE:
         print("Performing experience replay warmup...")
@@ -63,10 +73,17 @@ def training_thread():
     episode_laps = []
     recent_rewards = deque(maxlen=100)  # Track recent rewards for plotting
 
+    # Store loss history for plotting
+    total_loss_history = []
+    actor_loss_history = []
+    critic_loss_history = []
+    entropy_loss_history = []
+
     # Timing variables for neural network updates
     nn_update_count = 0
     last_nn_update_time = time.time()
     avg_nn_update_time = 0.0
+    update_times = deque(maxlen=100)  # Track recent update times
 
     # Time variables
     last_episode_end_time = time.time()
@@ -112,6 +129,13 @@ def training_thread():
             episode_actions.append(action.tolist())
             episode_step_rewards.append(reward)
 
+            # Update metrics more frequently for live display
+            if steps % 1 == 0:  # Update every step
+                with metrics_lock:
+                    metrics_data['recent_actions'] = episode_actions[-20:] if episode_actions else []
+                    metrics_data['recent_rewards'] = episode_step_rewards[-100:] if episode_step_rewards else []
+                    metrics_data['current_steps'] = steps  # Add current steps to metrics
+
             # Store in agent's trajectory
             agent.add_to_trajectory(state, action, log_prob, reward, next_state, done)
 
@@ -121,7 +145,7 @@ def training_thread():
             steps += 1
 
             # Prepare visualization data - create deep copies to avoid reference issues
-            if steps % 3 == 0 or done:  # Reduce frame updates to every 3rd step to lower overhead
+            if steps % 2 == 0 or done:  # Reduce frame updates to every 2nd step to lower overhead
                 frame_snapshot = {
                     'car': copy.deepcopy(env.car),  # Make copies to avoid reference issues
                     'walls': env.walls,  # Walls and checkpoints don't change often
@@ -130,6 +154,7 @@ def training_thread():
                     'total_reward': episode_reward,
                     'laps': env.car.laps_completed,
                     'episode': episode,
+                    'steps': steps,  # Include steps in frame data
                     'info': info.copy() if info else {}
                 }
 
@@ -181,10 +206,26 @@ def training_thread():
                 nn_update_time = time.time() - nn_update_start
                 nn_update_count += 1
                 avg_nn_update_time = avg_nn_update_time * 0.9 + nn_update_time * 0.1  # Exponential moving avg
+                update_times.append(nn_update_time)
 
                 # Calculate time since last update for metrics
                 time_since_last_update = time.time() - last_nn_update_time
                 last_nn_update_time = time.time()
+
+                # Store loss history for plotting - only if we actually did an update
+                if total_loss > 0:  # Only store non-zero losses
+                    total_loss_history.append(total_loss)
+                    actor_loss_history.append(actor_loss)
+                    critic_loss_history.append(critic_loss)
+                    entropy_loss_history.append(entropy_loss)
+
+                    # Keep history limited to a reasonable size for plotting
+                    max_loss_history = 1000
+                    if len(total_loss_history) > max_loss_history:
+                        total_loss_history = total_loss_history[-max_loss_history:]
+                        actor_loss_history = actor_loss_history[-max_loss_history:]
+                        critic_loss_history = critic_loss_history[-max_loss_history:]
+                        entropy_loss_history = entropy_loss_history[-max_loss_history:]
 
                 # Prepare metrics data outside the lock
                 local_metrics = {
@@ -198,7 +239,12 @@ def training_thread():
                     'updates_performed': metrics_data['updates_performed'] + 1,
                     'training_step': metrics_data['training_step'] + 1,
                     'nn_update_time': nn_update_time,
-                    'time_between_updates': time_since_last_update
+                    'avg_nn_update_time': np.mean(update_times) if update_times else 0,
+                    'time_between_updates': time_since_last_update,
+                    'loss_history': total_loss_history,
+                    'actor_loss_history': actor_loss_history,
+                    'critic_loss_history': critic_loss_history,
+                    'entropy_loss_history': entropy_loss_history
                 }
 
                 # Update metrics data with minimal lock time
@@ -211,7 +257,7 @@ def training_thread():
         # Record end of episode time
         last_episode_end_time = time.time()
 
-        # End of episode
+        # End of episode - update metrics
         episode_rewards.append(episode_reward)
         episode_lengths.append(steps)
         episode_laps.append(env.car.laps_completed)
@@ -227,6 +273,8 @@ def training_thread():
             metrics_data['episode_lengths'] = episode_lengths
             metrics_data['episode_laps'] = episode_laps
             metrics_data['avg_rewards'].append(np.mean(recent_rewards) if recent_rewards else 0)
+            # Reset current steps at end of episode
+            metrics_data['current_steps'] = 0
 
             # Calculate average episode time and estimate completion time
             avg_episode_time = np.mean(metrics_data['episode_times'][-100:]) if metrics_data['episode_times'] else 0
@@ -253,8 +301,8 @@ def training_thread():
 
         # Save model periodically using improved async save
         if episode > 0 and episode % SAVE_INTERVAL == 0:
-            agent.save(f"ppo_car_model.pth")
+            agent.save("ppo_car_model.pth")
 
     # Save final model
-    agent.save("ppo_car_model_final.pth")
+    agent.save("ppo_car_model.pth")
     print("Training finished!")

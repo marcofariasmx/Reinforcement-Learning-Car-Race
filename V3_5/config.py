@@ -261,13 +261,14 @@ frame_data = {
     'total_reward': 0,
     'laps': 0,
     'episode': 0,
+    'steps': 0,  # Added steps count to frame data
     'info': {}
 }
 
 # Training parameters
 MAX_EPISODES = 10000  # Total episodes to train for
 
-# Training metrics for dashboard
+# Training metrics for dashboard - updated with all needed fields
 metrics_data = {
     'episode_rewards': [],  # List of episode rewards
     'episode_lengths': [],  # List of episode lengths (steps)
@@ -297,8 +298,14 @@ metrics_data = {
     'gpu_temp': 0,  # GPU temperature
     'gpu_util': 0,  # GPU utilization
     'nn_update_time': 0,  # Time for neural network update
+    'avg_nn_update_time': 0.0,  # Average time for neural network updates
     'time_between_updates': 0,  # Time between neural network updates
     'transfer_time': 0,  # Time for CPU-GPU transfers
+    'current_steps': 0,  # Current steps in the episode
+    'loss_history': [],  # History of total losses
+    'actor_loss_history': [],  # History of actor losses
+    'critic_loss_history': [],  # History of critic losses
+    'entropy_loss_history': []  # History of entropy losses
 }
 
 data_lock = threading.Lock()

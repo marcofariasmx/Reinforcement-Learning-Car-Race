@@ -470,7 +470,13 @@ class PPOAgent:
                 'episode_lengths': metrics_data['episode_lengths'].copy() if metrics_data['episode_lengths'] else [],
                 'episode_laps': metrics_data['episode_laps'].copy() if metrics_data['episode_laps'] else [],
                 'avg_rewards': metrics_data['avg_rewards'].copy() if metrics_data['avg_rewards'] else [],
-                'total_training_time': total_training_time  # Include this in both places for backwards compatibility
+                'total_training_time': total_training_time,  # Include this in both places for backwards compatibility
+                'loss_history': metrics_data.get('loss_history', [])[-1000:] if metrics_data.get('loss_history',
+                                                                                                 []) else [],
+                'actor_loss_history': metrics_data.get('actor_loss_history', [])[-1000:] if metrics_data.get(
+                    'actor_loss_history', []) else [],
+                'critic_loss_history': metrics_data.get('critic_loss_history', [])[-1000:] if metrics_data.get(
+                    'critic_loss_history', []) else []
             }
 
         # Create a save dictionary with deep copies to avoid reference issues
@@ -496,11 +502,11 @@ class PPOAgent:
             except Exception as e:
                 print(f"Error queueing model save: {e}")
                 # Fall back to synchronous save if queueing fails
-                torch.save(save_dict, filename)
+                torch.save(save_dict, filename, weights_only=False)
                 print(f"Model saved synchronously to {filename}")
         else:
             # Synchronous save
-            torch.save(save_dict, filename)
+            torch.save(save_dict, filename, weights_only=False)
             print(f"Model saved synchronously to {filename}")
 
         # Format the time for display
@@ -565,6 +571,14 @@ class PPOAgent:
                             metrics_data['episode_laps'] = checkpoint['training_metrics']['episode_laps']
                         if 'avg_rewards' in checkpoint['training_metrics']:
                             metrics_data['avg_rewards'] = checkpoint['training_metrics']['avg_rewards']
+
+                        # Load loss history if available
+                        if 'loss_history' in checkpoint['training_metrics']:
+                            metrics_data['loss_history'] = checkpoint['training_metrics']['loss_history']
+                        if 'actor_loss_history' in checkpoint['training_metrics']:
+                            metrics_data['actor_loss_history'] = checkpoint['training_metrics']['actor_loss_history']
+                        if 'critic_loss_history' in checkpoint['training_metrics']:
+                            metrics_data['critic_loss_history'] = checkpoint['training_metrics']['critic_loss_history']
 
                     # VERY IMPORTANT: Explicitly set the total training time from what we loaded
                     if loaded_total_time > 0:
