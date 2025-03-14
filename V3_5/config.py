@@ -266,7 +266,7 @@ frame_data = {
 }
 
 # Training parameters
-MAX_EPISODES = 10000  # Total episodes to train for
+MAX_EPISODES = 100000  # Total episodes to train for
 
 # Training metrics for dashboard - updated with all needed fields
 metrics_data = {
