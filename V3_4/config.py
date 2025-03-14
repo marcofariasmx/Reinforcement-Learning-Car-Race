@@ -36,7 +36,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # Constants
-SCREEN_WIDTH = 1200
+SCREEN_WIDTH = 1000
 SCREEN_HEIGHT = 800
 DASHBOARD_WIDTH = 800
 DASHBOARD_HEIGHT = 600
