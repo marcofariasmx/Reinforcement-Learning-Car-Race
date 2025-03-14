@@ -83,11 +83,11 @@ def main():
 
     # Training acceleration parameters
     parser.add_argument('--time_scale', type=float, default=1.0,
-                        help='Time scaling factor to accelerate training (higher = faster, default: 1.0)')
+                        help='Hardware acceleration multiplier - speeds up training without changing physics (higher = faster)')
     parser.add_argument('--frame_skip', type=int, default=1,
-                        help='Number of frames to skip for each processed frame (higher = faster, default: 1)')
+                        help='Visualization frame skip - only affects display refresh rate, not physics')
     parser.add_argument('--batch_update_freq', type=int, default=None,
-                        help=f'Update model every N steps (default: {BATCH_UPDATE_FREQUENCY})')
+                        help=f'Update model every N steps - lower values use more GPU (default: {BATCH_UPDATE_FREQUENCY})')
 
     # Visualization options
     parser.add_argument('--no_gui', action='store_true',

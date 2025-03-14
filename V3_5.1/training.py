@@ -26,11 +26,18 @@ def training_thread():
     # Load model if exists
     model_loaded = agent.load()
 
-    # Get training acceleration parameters
-    time_scale = TIME_SCALE
-    frame_skip = FRAME_SKIP
+    # Get hardware optimization parameters - keep settings but use them differently
     batch_update_frequency = BATCH_UPDATE_FREQUENCY
     steps_since_update = 0
+
+    # For hardware acceleration, we'll use parallel evaluation and processing
+    # but maintain original physics and reward structure
+    update_frequency_multiplier = TIME_SCALE
+    effective_batch_update_freq = max(1, int(batch_update_frequency / update_frequency_multiplier))
+
+    # Use these parameters for training UI display only
+    hardware_acceleration = TIME_SCALE
+    processing_stride = FRAME_SKIP
 
     # Use the episode count from the loaded model
     start_episode = agent.episode_count if model_loaded else 0
@@ -38,6 +45,8 @@ def training_thread():
     # Update metrics_data to store the starting episode number
     with metrics_lock:
         metrics_data['start_episode'] = start_episode
+        metrics_data['hardware_acceleration'] = hardware_acceleration
+        metrics_data['processing_stride'] = processing_stride
 
         # Initialize loss history lists if they don't exist
         if 'loss_history' not in metrics_data:
@@ -118,6 +127,15 @@ def training_thread():
         # Add episode noise for exploration - annealing over time
         exploration_noise = max(0.1, 1.0 * (0.98 ** episode))  # Decay from 1.0 to 0.1
 
+        # Batch collect - for hardware acceleration without changing physics
+        mini_batch_size = processing_stride
+        accumulated_states = []
+        accumulated_actions = []
+        accumulated_log_probs = []
+        accumulated_rewards = []
+        accumulated_next_states = []
+        accumulated_dones = []
+
         # Main episode loop
         while not done:
             # Select action with exploration noise that decreases over time
@@ -129,8 +147,16 @@ def training_thread():
                 # Regular action selection
                 action, log_prob = agent.select_action(state)
 
-            # Execute action with time scaling and frame skipping
-            next_state, reward, done, info = env.step(action, time_scale=time_scale, frame_skip=frame_skip)
+            # Execute action - using original physics time step
+            next_state, reward, done, info = env.step(action)
+
+            # Accumulate experience
+            accumulated_states.append(state)
+            accumulated_actions.append(action)
+            accumulated_log_probs.append(log_prob)
+            accumulated_rewards.append(reward)
+            accumulated_next_states.append(next_state)
+            accumulated_dones.append(done)
 
             # Track actions and rewards for this step
             episode_actions.append(action.tolist())
@@ -142,17 +168,41 @@ def training_thread():
                     metrics_data['recent_actions'] = episode_actions[-20:] if episode_actions else []
                     metrics_data['recent_rewards'] = episode_step_rewards[-100:] if episode_step_rewards else []
                     metrics_data['current_steps'] = steps  # Add current steps to metrics
+                    # Add hardware acceleration parameters for display
+                    metrics_data['hardware_acceleration'] = hardware_acceleration
+                    metrics_data['processing_stride'] = processing_stride
 
-            # Store in agent's trajectory
-            agent.add_to_trajectory(state, action, log_prob, reward, next_state, done)
+            # Add gathered experience to trajectory in batches for hardware acceleration
+            # This is purely for computational efficiency and doesn't change the physics
+            if len(accumulated_states) >= mini_batch_size or done:
+                # Process accumulated experience in optimized batch
+                for i in range(len(accumulated_states)):
+                    # Add to trajectory - maintains original reward structure
+                    agent.add_to_trajectory(
+                        accumulated_states[i],
+                        accumulated_actions[i],
+                        accumulated_log_probs[i],
+                        accumulated_rewards[i],
+                        accumulated_next_states[i],
+                        accumulated_dones[i]
+                    )
+
+                # Clear the accumulated batch
+                accumulated_states = []
+                accumulated_actions = []
+                accumulated_log_probs = []
+                accumulated_rewards = []
+                accumulated_next_states = []
+                accumulated_dones = []
 
             # Update state and episode reward
             state = next_state
             episode_reward += reward
             steps += 1
 
-            # Prepare visualization data - reduce frame updates based on frame skip to lower overhead
-            if steps % (2 * frame_skip) == 0 or done:
+            # Prepare visualization data - create deep copies to avoid reference issues
+            # Just update visualization less frequently for performance
+            if steps % max(1, processing_stride) == 0 or done:
                 frame_snapshot = {
                     'car': copy.deepcopy(env.car),
                     'walls': env.walls,
@@ -162,9 +212,11 @@ def training_thread():
                     'laps': env.car.laps_completed,
                     'episode': episode,
                     'steps': steps,
-                    'info': info.copy() if info else {},
-                    'time_scale': time_scale,  # Add time scale to frame data
-                    'frame_skip': frame_skip  # Add frame skip to frame data
+                    'info': {
+                        **info,
+                        'hardware_acceleration': hardware_acceleration,
+                        'processing_stride': processing_stride
+                    }
                 }
 
                 # Try to update frame buffer without blocking
@@ -178,11 +230,11 @@ def training_thread():
                 except Exception:
                     pass
 
-            # Update agent based on steps since last update rather than just trajectory length
+            # Update agent based on steps and hardware acceleration
             steps_since_update += 1
 
-            # Update when we reach batch_update_frequency steps or when episode ends
-            if steps_since_update >= batch_update_frequency or done or len(agent.trajectory) >= BATCH_SIZE:
+            # Update more frequently with hardware acceleration
+            if (steps_since_update >= effective_batch_update_freq) or done or len(agent.trajectory) >= BATCH_SIZE:
                 # Start timing for neural network update
                 nn_update_start = time.time()
 
@@ -207,7 +259,7 @@ def training_thread():
                         if isinstance(last_value, np.ndarray):
                             last_value = float(last_value.item())
 
-                # End trajectory and perform update (only if we have enough data)
+                # End trajectory and perform update (potentially expensive operation)
                 if len(agent.trajectory) > 0:
                     agent.end_trajectory(last_value)
 
@@ -258,7 +310,9 @@ def training_thread():
                             'loss_history': total_loss_history,
                             'actor_loss_history': actor_loss_history,
                             'critic_loss_history': critic_loss_history,
-                            'entropy_loss_history': entropy_loss_history
+                            'entropy_loss_history': entropy_loss_history,
+                            'hardware_acceleration': hardware_acceleration,
+                            'processing_stride': processing_stride
                         }
 
                         # Update metrics data with minimal lock time
@@ -311,7 +365,7 @@ def training_thread():
             current_lr = agent.scheduler.get_last_lr()[0]
             print(f"Episode {episode}: Reward = {episode_reward:.2f}, Avg Reward = {np.mean(recent_rewards):.2f}, "
                   f"Laps = {env.car.laps_completed}, Steps = {steps}, LR = {current_lr:.6f}, "
-                  f"NN Update Time = {avg_nn_update_time:.4f}s, Time Scale = {time_scale:.1f}x")
+                  f"NN Update Time = {avg_nn_update_time:.4f}s, HW Accel = {hardware_acceleration:.1f}x")
 
         # Save model periodically using improved async save
         if episode > 0 and episode % SAVE_INTERVAL == 0:

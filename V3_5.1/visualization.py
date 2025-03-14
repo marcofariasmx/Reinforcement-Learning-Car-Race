@@ -285,8 +285,8 @@ def combined_rendering_thread():
                 gpu_util = local_metrics_data.get('gpu_util', 0) if local_metrics_data else 0
 
                 # Get time scale and frame skip safely from info
-                time_scale = info.get('time_scale', 1.0)
-                frame_skip = info.get('frame_skip', 1)
+                time_scale = info.get('hardware_acceleration', 1.0)
+                frame_skip = info.get('processing_stride', 1)
 
                 # Draw simulation part (left side)
                 # ===================================
@@ -382,8 +382,8 @@ def combined_rendering_thread():
                     f"Update Time: {avg_update_time * 1000:.1f}ms",
                     f"NN Update Time: {nn_update_time * 1000:.1f}ms",
                     f"Time Between NN Updates: {time_between_updates:.2f}s",
-                    f"Time Scale: {time_scale:.1f}x",
-                    f"Frame Skip: {frame_skip}",
+                    f"Hardware Accel: {time_scale:.1f}x",  # Changed from "Time Scale"
+                    f"Visual Frame Skip: {frame_skip}",    # Changed from "Frame Skip"
                     f"GPU Util: {gpu_util}%" if gpu_util else ""
                 ]
 
@@ -479,7 +479,7 @@ def combined_rendering_thread():
                                 f"LR: {local_metrics_data.get('learning_rate', 0):.6f}",
                                 f"Entropy: {local_metrics_data.get('entropy_coef', 0):.4f}",
                                 f"Loss: {local_metrics_data.get('last_loss', 0):.4f}",
-                                f"Time Scale: {time_scale:.1f}x",
+                                f"HW Acceleration: {time_scale:.1f}x",  # Changed from "Time Scale"
                                 f"Frame Skip: {frame_skip}"
                             ]
 

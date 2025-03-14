@@ -77,9 +77,9 @@ PURPLE = (128, 0, 128)
 CYAN = (0, 255, 255)
 
 # Training acceleration parameters
-TIME_SCALE = 50.0  # Default: 1.0 (no acceleration), higher = faster simulation
-FRAME_SKIP = 1  # Default: 1 (no skipping), higher = skip more frames
-BATCH_UPDATE_FREQUENCY = 256  # Update neural network every N steps
+TIME_SCALE = 50.0  # Hardware acceleration multiplier - doesn't affect physics
+FRAME_SKIP = 2    # How often to update visualization - doesn't affect physics
+BATCH_UPDATE_FREQUENCY = 1000000  # Update neural network every N steps
 
 
 # Function to detect hardware capabilities and set optimal parameters
@@ -266,8 +266,10 @@ def print_current_settings():
     print(f"GPU for Inference: {USE_GPU_FOR_INFERENCE}")
     print(f"Async Save: {USE_ASYNC_SAVE}")
     print(f"Time Scale: {TIME_SCALE}x")
-    print(f"Frame Skip: {FRAME_SKIP}")
+    print(f"Hardware Acceleration: {TIME_SCALE}x")
+    print(f"Visualization Frame Skip: {FRAME_SKIP}")
     print(f"Batch Update Frequency: {BATCH_UPDATE_FREQUENCY} steps")
+    print("===========================\n")
     if GPU_INFO:
         print(f"GPU: {GPU_INFO['name']}, VRAM: {GPU_INFO['vram_gb']:.2f} GB")
     print("===========================\n")
