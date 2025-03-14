@@ -4,8 +4,10 @@ import time
 import random
 from collections import deque
 import copy
+import threading
 
-from config import data_lock, frame_data, metrics_data, running, MAX_EPISODES, BATCH_SIZE, device, frame_buffer
+from config import (data_lock, metrics_lock, frame_data, metrics_data, running,
+                    MAX_EPISODES, BATCH_SIZE, device, frame_buffer, SAVE_INTERVAL)
 from models import PPOAgent
 from environment import CarEnv
 
@@ -13,6 +15,8 @@ from environment import CarEnv
 # Training thread with enhanced exploration and learning
 def training_thread():
     global frame_data, running, metrics_data
+
+    print("Starting optimized training thread...")
 
     # Create environment and agent
     env = CarEnv()
@@ -25,7 +29,7 @@ def training_thread():
     start_episode = agent.episode_count if model_loaded else 0
 
     # Update metrics_data to store the starting episode number
-    with data_lock:
+    with metrics_lock:
         metrics_data['start_episode'] = start_episode
 
     # Experience replay warmup - generate some initial experiences
@@ -64,18 +68,24 @@ def training_thread():
     last_nn_update_time = time.time()
     avg_nn_update_time = 0.0
 
+    # Time variables
+    last_episode_end_time = time.time()
+
     # Start from the correct episode number
     for episode in range(start_episode, MAX_EPISODES):
         if not running:
             break
 
+        episode_start_time = time.time()
+
+        # Track time between episodes
+        time_between_episodes = episode_start_time - last_episode_end_time
+
+        # Reset environment
         state = env.reset()
         episode_reward = 0
         done = False
         steps = 0
-
-        # Record start time for this episode
-        episode_start_time = time.time()
 
         # Tracking variables for this episode
         episode_actions = []
@@ -84,6 +94,7 @@ def training_thread():
         # Add episode noise for exploration - annealing over time
         exploration_noise = max(0.1, 1.0 * (0.98 ** episode))  # Decay from 1.0 to 0.1
 
+        # Main episode loop
         while not done:
             # Select action with exploration noise that decreases over time
             if np.random.random() < exploration_noise and episode < 100:
@@ -109,35 +120,32 @@ def training_thread():
             episode_reward += reward
             steps += 1
 
-            # Prepare visualization data - create a frame snapshot
-            frame_snapshot = {
-                'car': copy.copy(env.car),  # Make copies to avoid reference issues
-                'walls': env.walls,  # Walls and checkpoints don't change often
-                'checkpoints': env.checkpoints,
-                'reward': reward,
-                'total_reward': episode_reward,
-                'laps': env.car.laps_completed,
-                'episode': episode,
-                'info': info.copy() if info else {}
-            }
+            # Prepare visualization data - create deep copies to avoid reference issues
+            if steps % 3 == 0 or done:  # Reduce frame updates to every 3rd step to lower overhead
+                frame_snapshot = {
+                    'car': copy.deepcopy(env.car),  # Make copies to avoid reference issues
+                    'walls': env.walls,  # Walls and checkpoints don't change often
+                    'checkpoints': env.checkpoints,
+                    'reward': reward,
+                    'total_reward': episode_reward,
+                    'laps': env.car.laps_completed,
+                    'episode': episode,
+                    'info': info.copy() if info else {}
+                }
 
-            # Try to update frame buffer without blocking - priority is to keep training fast
-            try:
-                # Put new frame in buffer, discarding old frames if full
-                if frame_buffer.full():
-                    try:
-                        frame_buffer.get_nowait()  # Remove oldest frame
-                    except:
-                        pass
-                frame_buffer.put_nowait(frame_snapshot)
-            except:
-                pass  # Never block training for visualization
+                # Try to update frame buffer without blocking
+                try:
+                    # Keep the frame buffer updated without blocking
+                    if frame_buffer.full():
+                        try:
+                            frame_buffer.get_nowait()  # Remove oldest frame
+                        except Exception:
+                            pass  # Ignore if buffer was emptied by another thread
+                    frame_buffer.put_nowait(frame_snapshot)
+                except Exception:
+                    pass  # Never block training for visualization
 
-            # Also update the traditional frame_data for backward compatibility
-            with data_lock:
-                frame_data.update(frame_snapshot)
-
-            # Update agent - this is potentially expensive and may block for a while
+            # Update agent periodically - adjust frequency based on performance
             if len(agent.trajectory) >= BATCH_SIZE or done:
                 # Start timing for neural network update
                 nn_update_start = time.time()
@@ -147,11 +155,21 @@ def training_thread():
                     last_value = 0
                 else:
                     with torch.no_grad():
-                        next_state_tensor = torch.FloatTensor(next_state).to(device).unsqueeze(0)
-                        agent.actor_critic.eval()  # Set to eval mode for inference
-                        _, _, last_value = agent.actor_critic(next_state_tensor)
-                        agent.actor_critic.train()  # Back to train mode
-                        last_value = last_value.cpu().data.numpy()
+                        if agent.use_cpu_for_inference:
+                            # Faster inference on CPU for single sample
+                            next_state_tensor = torch.FloatTensor(next_state).unsqueeze(0)
+                            agent.cpu_actor_critic.eval()
+                            _, _, last_value = agent.cpu_actor_critic(next_state_tensor)
+                            agent.cpu_actor_critic.train()
+                            last_value = last_value.numpy()
+                        else:
+                            # GPU inference
+                            next_state_tensor = torch.FloatTensor(next_state).to(device).unsqueeze(0)
+                            agent.actor_critic.eval()
+                            _, _, last_value = agent.actor_critic(next_state_tensor)
+                            agent.actor_critic.train()
+                            last_value = last_value.cpu().numpy()
+
                         if isinstance(last_value, np.ndarray):
                             last_value = float(last_value.item())
 
@@ -164,7 +182,7 @@ def training_thread():
                 nn_update_count += 1
                 avg_nn_update_time = avg_nn_update_time * 0.9 + nn_update_time * 0.1  # Exponential moving avg
 
-                # Save update time info for debugging
+                # Calculate time since last update for metrics
                 time_since_last_update = time.time() - last_nn_update_time
                 last_nn_update_time = time.time()
 
@@ -179,17 +197,19 @@ def training_thread():
                     'memory_usage': len(agent.memory),
                     'updates_performed': metrics_data['updates_performed'] + 1,
                     'training_step': metrics_data['training_step'] + 1,
-                    'last_nn_update_time': nn_update_time,
-                    'avg_nn_update_time': avg_nn_update_time,
+                    'nn_update_time': nn_update_time,
                     'time_between_updates': time_since_last_update
                 }
 
                 # Update metrics data with minimal lock time
-                with data_lock:
+                with metrics_lock:
                     metrics_data.update(local_metrics)
 
         # End of episode - update agent's episode tracking
         agent.end_episode(episode_reward)
+
+        # Record end of episode time
+        last_episode_end_time = time.time()
 
         # End of episode
         episode_rewards.append(episode_reward)
@@ -201,11 +221,11 @@ def training_thread():
         episode_time = time.time() - episode_start_time
 
         # Update episode metrics in one atomic operation to minimize lock time
-        with data_lock:
+        with metrics_lock:
             metrics_data['episode_times'].append(episode_time)
-            metrics_data['episode_rewards'] = episode_rewards.copy()
-            metrics_data['episode_lengths'] = episode_lengths.copy()
-            metrics_data['episode_laps'] = episode_laps.copy()
+            metrics_data['episode_rewards'] = episode_rewards
+            metrics_data['episode_lengths'] = episode_lengths
+            metrics_data['episode_laps'] = episode_laps
             metrics_data['avg_rewards'].append(np.mean(recent_rewards) if recent_rewards else 0)
 
             # Calculate average episode time and estimate completion time
@@ -231,9 +251,10 @@ def training_thread():
                   f"Laps = {env.car.laps_completed}, Steps = {steps}, LR = {current_lr:.6f}, "
                   f"NN Update Time = {avg_nn_update_time:.4f}s")
 
-        # Save model periodically
-        if episode > 0 and episode % 10 == 0:
-            agent.save()
+        # Save model periodically using improved async save
+        if episode > 0 and episode % SAVE_INTERVAL == 0:
+            agent.save(f"ppo_car_model_ep{episode}.pth")
 
     # Save final model
-    agent.save()
+    agent.save("ppo_car_model_final.pth")
+    print("Training finished!")

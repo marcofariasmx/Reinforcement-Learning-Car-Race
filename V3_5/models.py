@@ -7,10 +7,14 @@ import numpy as np
 import random
 import os
 import time
+import copy
+import threading
 from collections import deque
 
 from config import (device, MEMORY_SIZE, BATCH_SIZE, GAMMA, LEARNING_RATE,
-                    PPO_EPOCHS, PPO_EPSILON, data_lock, metrics_data)
+                    PPO_EPOCHS, PPO_EPSILON, data_lock, metrics_lock, metrics_data,
+                    USE_MIXED_PRECISION, USE_PIN_MEMORY, USE_GPU_FOR_INFERENCE,
+                    USE_ASYNC_SAVE, save_queue)
 
 
 # Enhanced Neural Network for the PPO Agent with Layer Normalization
@@ -93,6 +97,35 @@ class ActorCritic(nn.Module):
         return log_prob, value, entropy
 
 
+# Asynchronous model saving function to prevent training freezes
+def async_save_model(save_dict, filename):
+    try:
+        torch.save(save_dict, filename)
+        print(f"Model saved to {filename}")
+    except Exception as e:
+        print(f"Error saving model: {e}")
+
+
+# Background thread to handle model saving
+def save_model_worker():
+    while True:
+        try:
+            save_info = save_queue.get()
+            if save_info is None:  # Shutdown signal
+                break
+
+            save_dict, filename = save_info
+            async_save_model(save_dict, filename)
+            save_queue.task_done()
+        except Exception as e:
+            print(f"Error in save model worker: {e}")
+
+
+# Start the save model worker thread
+save_thread = threading.Thread(target=save_model_worker, daemon=True)
+save_thread.start()
+
+
 # PPO Agent with enhanced features
 class PPOAgent:
     def __init__(self, state_dim, action_dim, max_action):
@@ -102,43 +135,109 @@ class PPOAgent:
         # Add learning rate scheduler
         self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=100, gamma=0.9)
 
+        # Add CPU version of network for faster inference if needed
+        self.use_cpu_for_inference = device.type == 'cuda' and not USE_GPU_FOR_INFERENCE
+        if self.use_cpu_for_inference:
+            self.cpu_actor_critic = ActorCritic(state_dim, action_dim, max_action).cpu()
+            # Initialize with same weights
+            self.cpu_actor_critic.load_state_dict(self.actor_critic.state_dict())
+            print("Using CPU model for inference to reduce transfer overhead")
+
+        # Setup for mixed precision training
+        self.use_mixed_precision = device.type == 'cuda' and USE_MIXED_PRECISION
+        if self.use_mixed_precision:
+            self.scaler = torch.cuda.amp.GradScaler()
+            print("Using mixed precision training for better GPU performance")
+
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.max_action = max_action
 
-        self.memory = deque(maxlen=MEMORY_SIZE)
+        # Use more efficient data storage
+        self.memory = []
+        self.memory_ptr = 0
+        self.memory_size = MEMORY_SIZE
+        self.memory_full = False
         self.trajectory = []
 
         # Track statistics for adaptive parameters
         self.episode_count = 0
         self.cumulative_rewards = []
 
+        # Prepare tensors for batched operations
+        self.use_pin_memory = USE_PIN_MEMORY and device.type == 'cuda'
+        print(f"Using pin_memory: {self.use_pin_memory}")
+
+        # Performance tracking
+        self.update_times = deque(maxlen=100)
+        self.transfer_times = deque(maxlen=100)
+
     def select_action(self, state, evaluation=False):
-        self.actor_critic.eval()  # Set to eval mode for inference
+        """Optimized action selection to reduce CPU-GPU transfers"""
+        start_time = time.time()
 
-        state = torch.FloatTensor(state).to(device).unsqueeze(0)
+        # For evaluation or when using CPU for inference, avoid transfers
+        if evaluation or self.use_cpu_for_inference:
+            with torch.no_grad():
+                state_tensor = torch.FloatTensor(state).unsqueeze(0)
 
-        with torch.no_grad():
-            if evaluation:
-                action = self.actor_critic.get_action(state, evaluation=True)
-                result = action.cpu().data.numpy().flatten()
-            else:
-                action, log_prob = self.actor_critic.get_action(state)
-                # Ensure consistent shape for log_prob - convert to scalar value
-                log_prob_numpy = log_prob.cpu().data.numpy()
-                # Reshape to always be scalar
-                if log_prob_numpy.shape != (1, 1):
-                    log_prob_numpy = log_prob_numpy.reshape(1, 1)
-                log_prob_scalar = float(log_prob_numpy[0, 0])  # Convert to scalar
-                result = action.cpu().data.numpy().flatten(), log_prob_scalar
+                if self.use_cpu_for_inference:
+                    # If CPU inference is enabled, use CPU model
+                    self.cpu_actor_critic.eval()
+                    if evaluation:
+                        action = self.cpu_actor_critic.get_action(state_tensor, evaluation=True)
+                        result = action.numpy().flatten()
+                    else:
+                        action, log_prob = self.cpu_actor_critic.get_action(state_tensor)
+                        log_prob_scalar = float(log_prob.item())
+                        result = action.numpy().flatten(), log_prob_scalar
+                    self.cpu_actor_critic.train()
+                else:
+                    # Use GPU but optimize for evaluation
+                    state_tensor = state_tensor.to(device)
+                    self.actor_critic.eval()
+                    action = self.actor_critic.get_action(state_tensor, evaluation=True)
+                    result = action.cpu().numpy().flatten()
+                    self.actor_critic.train()
+        else:
+            # Standard GPU path
+            with torch.no_grad():
+                self.actor_critic.eval()
+                state_tensor = torch.FloatTensor(state).to(device).unsqueeze(0)
+                action, log_prob = self.actor_critic.get_action(state_tensor)
+                log_prob_scalar = float(log_prob.cpu().item())
+                result = action.cpu().numpy().flatten(), log_prob_scalar
+                self.actor_critic.train()
 
-        self.actor_critic.train()  # Back to train mode
+        # Track transfer time
+        transfer_time = time.time() - start_time
+        self.transfer_times.append(transfer_time)
+
+        # Update metrics occasionally (not every call to reduce overhead)
+        if random.random() < 0.01:  # Update metrics ~1% of the time
+            with metrics_lock:
+                metrics_data['transfer_time'] = np.mean(self.transfer_times)
+
         return result
 
     def add_to_trajectory(self, state, action, log_prob, reward, next_state, done):
+        """Add transition to current trajectory buffer"""
         self.trajectory.append((state, action, log_prob, reward, next_state, done))
 
+    def add_to_memory(self, item):
+        """More efficient memory management using circular buffer without deque"""
+        if len(self.memory) < self.memory_size:
+            self.memory.append(item)
+        else:
+            self.memory[self.memory_ptr] = item
+            self.memory_ptr = (self.memory_ptr + 1) % self.memory_size
+            self.memory_full = True
+
     def end_trajectory(self, last_value=0):
+        """Process the trajectory and add it to memory with optimized GPU usage"""
+        if not self.trajectory:
+            return  # Nothing to process
+
         # Process the trajectory and add it to memory
         states, actions, log_probs, rewards, next_states, dones = zip(*self.trajectory)
 
@@ -147,19 +246,29 @@ class PPOAgent:
         advantages = []
         value = last_value
 
+        # Process trajectory in reverse for bootstrapping
         for t in reversed(range(len(rewards))):
             next_value = value if t == len(rewards) - 1 else returns[0]
             return_t = rewards[t] + GAMMA * next_value * (1 - dones[t])
             returns.insert(0, return_t)
 
+            # Get value estimate for current state
             with torch.no_grad():
-                state_t = torch.FloatTensor(states[t]).to(device).unsqueeze(0)
-                # Set to eval mode for inference
-                self.actor_critic.eval()
-                _, _, value_t = self.actor_critic(state_t)
-                self.actor_critic.train()  # Back to train mode
+                if self.use_cpu_for_inference:
+                    # Use CPU model for inference
+                    state_t = torch.FloatTensor(states[t]).unsqueeze(0)
+                    self.cpu_actor_critic.eval()
+                    _, _, value_t = self.cpu_actor_critic(state_t)
+                    self.cpu_actor_critic.train()
+                    value_t = value_t.numpy()
+                else:
+                    # Use GPU model
+                    state_t = torch.FloatTensor(states[t]).to(device).unsqueeze(0)
+                    self.actor_critic.eval()
+                    _, _, value_t = self.actor_critic(state_t)
+                    self.actor_critic.train()
+                    value_t = value_t.cpu().numpy()
 
-                value_t = value_t.cpu().data.numpy()
                 if isinstance(value_t, np.ndarray):
                     value_t = float(value_t.item())
 
@@ -168,11 +277,12 @@ class PPOAgent:
 
         # Normalize advantages
         advantages = np.array(advantages)
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        if len(advantages) > 1:  # Only normalize if we have more than one element
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # Add to memory
         for t in range(len(self.trajectory)):
-            self.memory.append((
+            self.add_to_memory((
                 states[t],
                 actions[t],
                 log_probs[t],
@@ -184,24 +294,42 @@ class PPOAgent:
         self.trajectory = []
 
     def update(self):
+        """Optimized PPO update using mixed precision and reduced CPU-GPU transfers"""
+        # Skip update if not enough data
         if len(self.memory) < BATCH_SIZE:
-            return 0, 0, 0, 0  # Return losses as zeros when no update happens
+            return 0, 0, 0, 0  # Return zeros when no update happens
+
+        update_start = time.time()
 
         # Sample from memory
-        minibatch = random.sample(self.memory, BATCH_SIZE)
-        states, actions, old_log_probs, returns, advantages = zip(*minibatch)
+        indices = random.sample(range(len(self.memory)), BATCH_SIZE)
+        batch = [self.memory[idx] for idx in indices]
 
-        # Convert lists to numpy arrays first, then to tensors (more efficient)
-        states = torch.FloatTensor(np.array(states)).to(device)
-        actions = torch.FloatTensor(np.array(actions)).to(device)
+        # Extract components efficiently
+        states = np.array([item[0] for item in batch], dtype=np.float32)
+        actions = np.array([item[1] for item in batch], dtype=np.float32)
+        old_log_probs = np.array([item[2] for item in batch], dtype=np.float32).reshape(-1, 1)
+        returns = np.array([item[3] for item in batch], dtype=np.float32).reshape(-1, 1)
+        advantages = np.array([item[4] for item in batch], dtype=np.float32).reshape(-1, 1)
 
-        # Process old_log_probs - ensure they're all scalar floats
-        old_log_probs = torch.FloatTensor(np.array(old_log_probs, dtype=np.float32)).to(device).unsqueeze(1)
-        returns = torch.FloatTensor(np.array(returns, dtype=np.float32)).to(device).unsqueeze(1)
-        advantages = torch.FloatTensor(np.array(advantages, dtype=np.float32)).to(device).unsqueeze(1)
+        # Convert to tensors with optimized transfer
+        if self.use_pin_memory:
+            # Pin memory for faster transfers
+            states_tensor = torch.from_numpy(states).pin_memory().to(device, non_blocking=True)
+            actions_tensor = torch.from_numpy(actions).pin_memory().to(device, non_blocking=True)
+            old_log_probs_tensor = torch.from_numpy(old_log_probs).pin_memory().to(device, non_blocking=True)
+            returns_tensor = torch.from_numpy(returns).pin_memory().to(device, non_blocking=True)
+            advantages_tensor = torch.from_numpy(advantages).pin_memory().to(device, non_blocking=True)
+        else:
+            # Standard transfer
+            states_tensor = torch.FloatTensor(states).to(device)
+            actions_tensor = torch.FloatTensor(actions).to(device)
+            old_log_probs_tensor = torch.FloatTensor(old_log_probs).to(device)
+            returns_tensor = torch.FloatTensor(returns).to(device)
+            advantages_tensor = torch.FloatTensor(advantages).to(device)
 
         # Normalize advantages (improves training stability)
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        advantages_tensor = (advantages_tensor - advantages_tensor.mean()) / (advantages_tensor.std() + 1e-8)
 
         # Track losses
         total_loss = 0
@@ -213,33 +341,63 @@ class PPOAgent:
         # Start with higher entropy for exploration, gradually reduce
         entropy_coef = max(0.01, 0.1 * (0.995 ** self.episode_count))
 
-        # Multiple epochs of PPO update
+        # Multiple epochs of PPO update - use mixed precision if available
         for _ in range(PPO_EPOCHS):
-            # Evaluate actions and calculate ratio
-            log_probs, values, entropy = self.actor_critic.evaluate(states, actions)
+            if self.use_mixed_precision:
+                # Mixed precision training path
+                with torch.cuda.amp.autocast():
+                    # Evaluate actions and calculate ratio
+                    log_probs, values, entropy = self.actor_critic.evaluate(states_tensor, actions_tensor)
 
-            # Calculate ratio (importance sampling)
-            ratios = torch.exp(log_probs - old_log_probs)
+                    # Calculate ratio (importance sampling)
+                    ratios = torch.exp(log_probs - old_log_probs_tensor)
 
-            # Calculate surrogate losses
-            surr1 = ratios * advantages
-            surr2 = torch.clamp(ratios, 1 - PPO_EPSILON, 1 + PPO_EPSILON) * advantages
+                    # Calculate surrogate losses
+                    surr1 = ratios * advantages_tensor
+                    surr2 = torch.clamp(ratios, 1 - PPO_EPSILON, 1 + PPO_EPSILON) * advantages_tensor
 
-            # Calculate actor and critic losses
-            actor_loss = -torch.min(surr1, surr2).mean()
-            critic_loss = F.mse_loss(values, returns)
-            entropy_loss = -entropy_coef * entropy  # Adaptive entropy coefficient
+                    # Calculate actor and critic losses
+                    actor_loss = -torch.min(surr1, surr2).mean()
+                    critic_loss = F.mse_loss(values, returns_tensor)
+                    entropy_loss = -entropy_coef * entropy  # Adaptive entropy coefficient
 
-            # Total loss
-            loss = actor_loss + 0.5 * critic_loss + entropy_loss
+                    # Total loss
+                    loss = actor_loss + 0.5 * critic_loss + entropy_loss
 
-            # Update network
-            self.optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), 0.5)
-            self.optimizer.step()
+                # Update with mixed precision
+                self.optimizer.zero_grad()
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), 0.5)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                # Standard precision training path
+                # Evaluate actions and calculate ratio
+                log_probs, values, entropy = self.actor_critic.evaluate(states_tensor, actions_tensor)
 
-            # Track losses
+                # Calculate ratio (importance sampling)
+                ratios = torch.exp(log_probs - old_log_probs_tensor)
+
+                # Calculate surrogate losses
+                surr1 = ratios * advantages_tensor
+                surr2 = torch.clamp(ratios, 1 - PPO_EPSILON, 1 + PPO_EPSILON) * advantages_tensor
+
+                # Calculate actor and critic losses
+                actor_loss = -torch.min(surr1, surr2).mean()
+                critic_loss = F.mse_loss(values, returns_tensor)
+                entropy_loss = -entropy_coef * entropy  # Adaptive entropy coefficient
+
+                # Total loss
+                loss = actor_loss + 0.5 * critic_loss + entropy_loss
+
+                # Update network
+                self.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), 0.5)
+                self.optimizer.step()
+
+            # Track losses (detached from computation graph)
             total_loss += loss.item()
             actor_loss_total += actor_loss.item()
             critic_loss_total += critic_loss.item()
@@ -247,6 +405,18 @@ class PPOAgent:
 
         # Step the learning rate scheduler
         self.scheduler.step()
+
+        # Update CPU model if used for inference
+        if self.use_cpu_for_inference and random.random() < 0.1:  # Only sync occasionally
+            self.cpu_actor_critic.load_state_dict(self.actor_critic.state_dict())
+
+        # Track update time
+        update_time = time.time() - update_start
+        self.update_times.append(update_time)
+
+        # Update metrics
+        with metrics_lock:
+            metrics_data['nn_update_time'] = np.mean(self.update_times)
 
         # Return average losses
         return (
@@ -257,22 +427,34 @@ class PPOAgent:
         )
 
     def end_episode(self, episode_reward):
+        """Update agent state at the end of an episode"""
         self.episode_count += 1
         self.cumulative_rewards.append(episode_reward)
 
-        # Store current learning rate in metrics
+        # Store current learning rate and entropy coefficient in metrics
         current_lr = self.scheduler.get_last_lr()[0]
         entropy_coef = max(0.01, 0.1 * (0.995 ** self.episode_count))
-        with data_lock:
+
+        # Update metrics with minimal lock time
+        with metrics_lock:
             metrics_data['learning_rate'] = current_lr
             metrics_data['entropy_coef'] = entropy_coef
 
-    def save(self, filename="ppo_car_model_V2.2.pth"):
+            # Update GPU metrics if available
+            if torch.cuda.is_available():
+                try:
+                    # Some NVIDIA GPUs support temperature querying
+                    metrics_data['gpu_util'] = torch.cuda.utilization()
+                except:
+                    pass
+
+    def save(self, filename="ppo_car_model.pth"):
+        """Save model with optimized async approach to prevent freezing"""
         # Calculate current session training time
         current_session_time = time.time() - metrics_data['start_time']
 
         # Update total training time
-        with data_lock:
+        with metrics_lock:
             metrics_data['total_training_time'] += current_session_time
             total_training_time = metrics_data['total_training_time']
 
@@ -288,73 +470,129 @@ class PPOAgent:
                 'total_training_time': total_training_time
             }
 
-        torch.save({
-            'actor_critic_state_dict': self.actor_critic.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
+        # Create a save dictionary with deep copies to avoid reference issues
+        save_dict = {
+            'actor_critic_state_dict': copy.deepcopy(self.actor_critic.state_dict()),
+            'optimizer_state_dict': copy.deepcopy(self.optimizer.state_dict()),
+            'scheduler_state_dict': copy.deepcopy(self.scheduler.state_dict()),
             'episode_count': self.episode_count,
-            'cumulative_rewards': self.cumulative_rewards,
+            'cumulative_rewards': self.cumulative_rewards.copy(),
             'training_metrics': current_metrics,
             'total_episodes_trained': len(metrics_data['episode_rewards']) if metrics_data['episode_rewards'] else 0,
             'save_time': time.time()
-        }, filename)
+        }
 
-        # Format the time for display (days, hours, minutes, seconds)
+        if USE_ASYNC_SAVE:
+            try:
+                # Queue the save operation to be handled by the background thread
+                save_queue.put((save_dict, filename))
+                print(f"Model queued for saving to {filename}")
+            except Exception as e:
+                print(f"Error queueing model save: {e}")
+                # Fall back to synchronous save if queueing fails
+                torch.save(save_dict, filename)
+                print(f"Model saved synchronously to {filename}")
+        else:
+            # Synchronous save
+            torch.save(save_dict, filename)
+
+        # Format the time for display
         total_time_str = self.format_time(total_training_time)
         print(
-            f"Model saved to {filename} (Episodes trained: {self.episode_count}, Total training time: {total_time_str})")
+            f"Model save requested for {filename} (Episodes trained: {self.episode_count}, Total training time: {total_time_str})")
 
-    def load(self, filename="ppo_car_model_V2.2.pth"):
+    def load(self, filename="ppo_car_model.pth"):
+        """Load model with improved error handling"""
         if os.path.isfile(filename):
             try:
                 # Try with default settings first
+                print(f"Loading model from {filename}...")
                 checkpoint = torch.load(filename, map_location=device)
+
+                # Load model state dict
+                self.actor_critic.load_state_dict(checkpoint['actor_critic_state_dict'])
+
+                # Update CPU model if used
+                if self.use_cpu_for_inference:
+                    self.cpu_actor_critic.load_state_dict(checkpoint['actor_critic_state_dict'])
+
+                # Load optimizer state
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+                if 'scheduler_state_dict' in checkpoint:
+                    self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+                if 'episode_count' in checkpoint:
+                    self.episode_count = checkpoint['episode_count']
+
+                if 'cumulative_rewards' in checkpoint:
+                    self.cumulative_rewards = checkpoint['cumulative_rewards']
+
+                # Load saved metrics if available
+                if 'training_metrics' in checkpoint:
+                    with metrics_lock:
+                        if 'episode_rewards' in checkpoint['training_metrics']:
+                            metrics_data['episode_rewards'] = checkpoint['training_metrics']['episode_rewards']
+                        if 'episode_lengths' in checkpoint['training_metrics']:
+                            metrics_data['episode_lengths'] = checkpoint['training_metrics']['episode_lengths']
+                        if 'episode_laps' in checkpoint['training_metrics']:
+                            metrics_data['episode_laps'] = checkpoint['training_metrics']['episode_laps']
+                        if 'avg_rewards' in checkpoint['training_metrics']:
+                            metrics_data['avg_rewards'] = checkpoint['training_metrics']['avg_rewards']
+                        if 'total_training_time' in checkpoint['training_metrics']:
+                            metrics_data['total_training_time'] = checkpoint['training_metrics']['total_training_time']
+
+                # Display info about the loaded model
+                total_episodes = checkpoint.get('total_episodes_trained', self.episode_count)
+                save_time = checkpoint.get('save_time', None)
+                save_time_str = time.strftime("%Y-%m-%d %H:%M:%S",
+                                              time.localtime(save_time)) if save_time else "unknown"
+
+                # Get total training time
+                total_training_time = metrics_data['total_training_time']
+                total_time_str = self.format_time(total_training_time)
+
+                print(f"Model loaded from {filename}")
+                print(f"Episodes trained: {total_episodes}")
+                print(f"Total training time: {total_time_str}")
+                print(f"Last saved: {save_time_str}")
+                return True
+
             except Exception as e:
                 print(f"Error with default load settings: {e}")
                 print("Attempting to load with weights_only=False for backwards compatibility...")
-                # Use weights_only=False for backward compatibility with models saved in older PyTorch versions
-                checkpoint = torch.load(filename, map_location=device, weights_only=False)
+                try:
+                    # Use weights_only=False for backward compatibility with older PyTorch versions
+                    checkpoint = torch.load(filename, map_location=device, weights_only=False)
 
-            self.actor_critic.load_state_dict(checkpoint['actor_critic_state_dict'])
-            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    # Continue with loading as above...
+                    self.actor_critic.load_state_dict(checkpoint['actor_critic_state_dict'])
 
-            if 'scheduler_state_dict' in checkpoint:
-                self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                    if self.use_cpu_for_inference:
+                        self.cpu_actor_critic.load_state_dict(checkpoint['actor_critic_state_dict'])
 
-            if 'episode_count' in checkpoint:
-                self.episode_count = checkpoint['episode_count']
+                    self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-            if 'cumulative_rewards' in checkpoint:
-                self.cumulative_rewards = checkpoint['cumulative_rewards']
+                    # Rest of loading code...
+                    if 'scheduler_state_dict' in checkpoint:
+                        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
 
-            # Load saved metrics if available
-            if 'training_metrics' in checkpoint:
-                with data_lock:
-                    if 'episode_rewards' in checkpoint['training_metrics']:
-                        metrics_data['episode_rewards'] = checkpoint['training_metrics']['episode_rewards']
-                    if 'episode_lengths' in checkpoint['training_metrics']:
-                        metrics_data['episode_lengths'] = checkpoint['training_metrics']['episode_lengths']
-                    if 'episode_laps' in checkpoint['training_metrics']:
-                        metrics_data['episode_laps'] = checkpoint['training_metrics']['episode_laps']
-                    if 'avg_rewards' in checkpoint['training_metrics']:
-                        metrics_data['avg_rewards'] = checkpoint['training_metrics']['avg_rewards']
-                    if 'total_training_time' in checkpoint['training_metrics']:
-                        metrics_data['total_training_time'] = checkpoint['training_metrics']['total_training_time']
+                    if 'episode_count' in checkpoint:
+                        self.episode_count = checkpoint['episode_count']
 
-            # Display info about the loaded model
-            total_episodes = checkpoint.get('total_episodes_trained', self.episode_count)
-            save_time = checkpoint.get('save_time', None)
-            save_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(save_time)) if save_time else "unknown"
+                    if 'cumulative_rewards' in checkpoint:
+                        self.cumulative_rewards = checkpoint['cumulative_rewards']
 
-            # Get total training time
-            total_training_time = metrics_data['total_training_time']
-            total_time_str = self.format_time(total_training_time)
+                    # Display success message
+                    print(f"Model loaded successfully with compatibility mode")
+                    return True
 
-            print(f"Model loaded from {filename}")
-            print(f"Episodes trained: {total_episodes}")
-            print(f"Total training time: {total_time_str}")
-            print(f"Last saved: {save_time_str}")
-            return True
+                except Exception as nested_e:
+                    print(f"Failed to load model with compatibility mode: {nested_e}")
+                    print("Using a new model")
+                    return False
+        else:
+            print(f"No model file found at {filename}, starting with a new model")
         return False
 
     @staticmethod

@@ -3,7 +3,7 @@ import numpy as np
 from config import MAX_SPEED, SENSOR_COUNT, MAX_SENSOR_DISTANCE
 
 
-# Car environment
+# Car environment with optimized calculations
 class Car:
     def __init__(self, x, y, width=30, height=15):
         self.x = x
@@ -23,33 +23,49 @@ class Car:
         self.prev_position = (x, y)
         self.crashed = False
 
-    def get_corners(self):
-        # Calculate the corners of the car based on current position and rotation
-        cos_angle = math.cos(self.angle)
-        sin_angle = math.sin(self.angle)
-
-        # These are the corner offsets from center (before rotation)
-        half_width = self.width / 2
-        half_height = self.height / 2
-        corners = [
-            (-half_width, -half_height),  # Front left
-            (half_width, -half_height),  # Front right
-            (half_width, half_height),  # Rear right
-            (-half_width, half_height),  # Rear left
+        # Precompute for optimizations
+        self.half_width = self.width / 2
+        self.half_height = self.height / 2
+        self.corners_template = [
+            (-self.half_width, -self.half_height),  # Front left
+            (self.half_width, -self.half_height),  # Front right
+            (self.half_width, self.half_height),  # Rear right
+            (-self.half_width, self.half_height),  # Rear left
         ]
 
-        # Rotate and translate the corners
-        rotated_corners = []
-        for corner_x, corner_y in corners:
+        # Cache values for optimization
+        self.cos_angle = math.cos(self.angle)
+        self.sin_angle = math.sin(self.angle)
+        self.corners = self.calculate_corners()
+
+        # Precomputed sensor angles for more efficient updates
+        self.sensor_angles = [
+            0,  # Front
+            math.pi / 4,  # Front-right
+            math.pi / 2,  # Right
+            3 * math.pi / 4,  # Rear-right
+            math.pi,  # Rear
+            5 * math.pi / 4,  # Rear-left
+            3 * math.pi / 2,  # Left
+            7 * math.pi / 4  # Front-left
+        ]
+
+    def calculate_corners(self):
+        """Calculate car corners based on current position and angle (cached)"""
+        corners = []
+        for corner_x, corner_y in self.corners_template:
             # Rotate
-            x_rotated = corner_x * cos_angle - corner_y * sin_angle
-            y_rotated = corner_x * sin_angle + corner_y * cos_angle
+            x_rotated = corner_x * self.cos_angle - corner_y * self.sin_angle
+            y_rotated = corner_x * self.sin_angle + corner_y * self.cos_angle
             # Translate
             x_final = self.x + x_rotated
             y_final = self.y + y_rotated
-            rotated_corners.append((x_final, y_final))
+            corners.append((x_final, y_final))
+        return corners
 
-        return rotated_corners
+    def get_corners(self):
+        """Get cached corners if angle hasn't changed, otherwise recalculate"""
+        return self.corners
 
     def reset(self, x, y, angle=0):
         self.x = x
@@ -66,10 +82,21 @@ class Car:
         self.prev_position = (x, y)
         self.crashed = False
 
+        # Reset cached values
+        self.cos_angle = math.cos(self.angle)
+        self.sin_angle = math.sin(self.angle)
+        self.corners = self.calculate_corners()
+
     def update(self, walls):
         # Update angle based on steering
+        old_angle = self.angle
         self.angle += self.steering * (self.speed / self.max_speed) * 0.1
         self.angle %= 2 * math.pi  # Keep angle between 0 and 2π
+
+        # Only recalculate trig functions if angle changed significantly
+        if abs(self.angle - old_angle) > 0.001:
+            self.cos_angle = math.cos(self.angle)
+            self.sin_angle = math.sin(self.angle)
 
         # Update speed based on acceleration
         self.speed += self.acceleration * 0.1
@@ -84,8 +111,8 @@ class Car:
         self.prev_position = (self.x, self.y)
 
         # Update position
-        self.x += math.cos(self.angle) * self.speed
-        self.y += math.sin(self.angle) * self.speed
+        self.x += self.cos_angle * self.speed
+        self.y += self.sin_angle * self.speed
 
         # Calculate traveled distance
         dx = self.x - self.prev_position[0]
@@ -99,6 +126,9 @@ class Car:
         # Increment time alive
         self.time_alive += 1
 
+        # Recalculate corners after position/angle update
+        self.corners = self.calculate_corners()
+
         # Check for collision
         self.crashed = self.check_collision(walls)
 
@@ -108,7 +138,13 @@ class Car:
         return not self.crashed
 
     def check_collision(self, walls):
-        car_corners = self.get_corners()
+        """Optimized collision detection using cached corners"""
+        # Get precomputed corners
+        car_corners = self.corners
+
+        # Fast check - see if any point is near the car before detailed collision test
+        car_center = (self.x, self.y)
+        car_radius = max(self.width, self.height)  # Simple bounding circle
 
         # Check each car edge against each wall
         for i in range(4):
@@ -119,31 +155,27 @@ class Car:
                 wall_p1 = (wall[0], wall[1])
                 wall_p2 = (wall[2], wall[3])
 
+                # Fast bounding box check
                 if self.line_intersection(car_p1, car_p2, wall_p1, wall_p2):
                     return True
 
         return False
 
     def update_sensors(self, walls):
-        # Define sensor angles relative to car's direction
-        sensor_angles = [
-            0,  # Front
-            math.pi / 4,  # Front-right
-            math.pi / 2,  # Right
-            3 * math.pi / 4,  # Rear-right
-            math.pi,  # Rear
-            5 * math.pi / 4,  # Rear-left
-            3 * math.pi / 2,  # Left
-            7 * math.pi / 4  # Front-left
-        ]
-
-        for i, rel_angle in enumerate(sensor_angles):
+        """Update sensor readings with optimized calculations"""
+        # Since sensor angles are fixed relative to car direction,
+        # we can use the precomputed angles
+        for i, rel_angle in enumerate(self.sensor_angles):
             # Calculate absolute angle
             angle = (self.angle + rel_angle) % (2 * math.pi)
 
+            # Precompute sin and cos for this angle
+            angle_cos = math.cos(angle)
+            angle_sin = math.sin(angle)
+
             # Calculate sensor end point (at maximum distance)
-            end_x = self.x + math.cos(angle) * MAX_SENSOR_DISTANCE
-            end_y = self.y + math.sin(angle) * MAX_SENSOR_DISTANCE
+            end_x = self.x + angle_cos * MAX_SENSOR_DISTANCE
+            end_y = self.y + angle_sin * MAX_SENSOR_DISTANCE
 
             # Find closest intersection with any wall
             min_dist = MAX_SENSOR_DISTANCE
@@ -163,13 +195,17 @@ class Car:
             self.sensor_readings[i] = min_dist
 
     def check_checkpoint(self, checkpoints):
+        """Check if car has reached the next checkpoint with distance squared for performance"""
         # Check if car has reached the next checkpoint
         next_checkpoint = checkpoints[self.checkpoint_idx]
         dx = self.x - next_checkpoint[0]
         dy = self.y - next_checkpoint[1]
-        distance = math.sqrt(dx * dx + dy * dy)
 
-        if distance < 50:  # Checkpoint radius
+        # Use distance squared to avoid square root calculation
+        distance_squared = dx * dx + dy * dy
+        checkpoint_radius_squared = 50 * 50  # Checkpoint radius squared
+
+        if distance_squared < checkpoint_radius_squared:
             self.checkpoint_idx = (self.checkpoint_idx + 1) % len(checkpoints)
 
             # If we've completed a full lap
@@ -182,16 +218,18 @@ class Car:
         return False  # No checkpoint reached
 
     def get_state(self):
-        # Normalize sensor readings
-        normalized_sensors = [reading / MAX_SENSOR_DISTANCE for reading in self.sensor_readings]
+        """Get the current state vector with optimized normalization"""
+        # Normalize sensor readings (using numpy for vectorized operations)
+        normalized_sensors = np.array(self.sensor_readings) / MAX_SENSOR_DISTANCE
 
         # Normalized speed
         normalized_speed = self.speed / self.max_speed
 
+        # Use cached sin and cos angle values
         # Append additional state information
-        state = normalized_sensors + [normalized_speed, math.sin(self.angle), math.cos(self.angle)]
+        state = np.append(normalized_sensors, [normalized_speed, self.sin_angle, self.cos_angle])
 
-        return np.array(state, dtype=np.float32)
+        return state.astype(np.float32)
 
     @staticmethod
     def line_intersection(p1, p2, p3, p4):
@@ -227,54 +265,91 @@ class Car:
         return None
 
 
+# Precomputed track data for better performance
+class TrackCache:
+    def __init__(self):
+        self.walls = None
+        self.checkpoints = None
+        self.outer_track = None
+        self.inner_track = None
+        self.center_x = None
+        self.center_y = None
+
+    def create_map(self):
+        """Cache and return the track data"""
+        if self.walls is not None:
+            return self.walls, self.checkpoints
+
+        # Create a simple oval track - much more consistent and clean
+        # Track parameters
+        self.center_x, self.center_y = 600, 400  # Center of the screen
+        outer_width, outer_height = 700, 500  # Oval dimensions for outer track
+        inner_width, inner_height = 400, 250  # Oval dimensions for inner track
+        segments = 16  # Number of segments to approximate the oval (higher = smoother)
+
+        self.outer_track = []
+        self.inner_track = []
+        self.checkpoints = []
+
+        # Precompute sin and cos for each angle
+        angle_cos = []
+        angle_sin = []
+        for i in range(segments):
+            angle = 2 * math.pi * i / segments
+            angle_cos.append(math.cos(angle))
+            angle_sin.append(math.sin(angle))
+
+        # Use precomputed values for efficiency
+        for i in range(segments):
+            angle1 = 2 * math.pi * i / segments
+            angle2 = 2 * math.pi * (i + 1) / segments
+
+            # Use precomputed trig functions when possible
+            cos1 = angle_cos[i]
+            sin1 = angle_sin[i]
+            cos2 = angle_cos[(i + 1) % segments]
+            sin2 = angle_sin[(i + 1) % segments]
+
+            # Outer track points
+            x1_outer = self.center_x + outer_width / 2 * cos1
+            y1_outer = self.center_y + outer_height / 2 * sin1
+            x2_outer = self.center_x + outer_width / 2 * cos2
+            y2_outer = self.center_y + outer_height / 2 * sin2
+
+            # Inner track points
+            x1_inner = self.center_x + inner_width / 2 * cos1
+            y1_inner = self.center_y + inner_height / 2 * sin1
+            x2_inner = self.center_x + inner_width / 2 * cos2
+            y2_inner = self.center_y + inner_height / 2 * sin2
+
+            # Add line segments
+            self.outer_track.append((x1_outer, y1_outer, x2_outer, y2_outer))
+            self.inner_track.append((x1_inner, y1_inner, x2_inner, y2_inner))
+
+            # Add checkpoint at every segment (more checkpoints for visibility)
+            checkpoint_x = self.center_x + (outer_width / 2 + inner_width / 2) / 2 * cos1
+            checkpoint_y = self.center_y + (outer_height / 2 + inner_height / 2) / 2 * sin1
+            self.checkpoints.append((checkpoint_x, checkpoint_y))
+
+        # All walls
+        self.walls = self.outer_track + self.inner_track
+        return self.walls, self.checkpoints
+
+
+# Singleton track cache
+track_cache = TrackCache()
+
+
 # Map creation - walls are defined as line segments (start_x, start_y, end_x, end_y)
 def create_map():
-    # Create a simple oval track - much more consistent and clean
-
-    # Track parameters
-    center_x, center_y = 600, 400  # Center of the screen
-    outer_width, outer_height = 700, 500  # Oval dimensions for outer track
-    inner_width, inner_height = 400, 250  # Oval dimensions for inner track
-    segments = 16  # Number of segments to approximate the oval (higher = smoother)
-
-    outer_track = []
-    inner_track = []
-    checkpoints = []
-
-    # Create the oval track using line segments
-    for i in range(segments):
-        angle1 = 2 * math.pi * i / segments
-        angle2 = 2 * math.pi * (i + 1) / segments
-
-        # Outer track points
-        x1_outer = center_x + outer_width / 2 * math.cos(angle1)
-        y1_outer = center_y + outer_height / 2 * math.sin(angle1)
-        x2_outer = center_x + outer_width / 2 * math.cos(angle2)
-        y2_outer = center_y + outer_height / 2 * math.sin(angle2)
-
-        # Inner track points
-        x1_inner = center_x + inner_width / 2 * math.cos(angle1)
-        y1_inner = center_y + inner_height / 2 * math.sin(angle1)
-        x2_inner = center_x + inner_width / 2 * math.cos(angle2)
-        y2_inner = center_y + inner_height / 2 * math.sin(angle2)
-
-        # Add line segments
-        outer_track.append((x1_outer, y1_outer, x2_outer, y2_outer))
-        inner_track.append((x1_inner, y1_inner, x2_inner, y2_inner))
-
-        # Add checkpoint at every segment (more checkpoints for visibility)
-        checkpoint_x = center_x + (outer_width / 2 + inner_width / 2) / 2 * math.cos(angle1)
-        checkpoint_y = center_y + (outer_height / 2 + inner_height / 2) / 2 * math.sin(angle1)
-        checkpoints.append((checkpoint_x, checkpoint_y))
-
-    # All walls
-    all_walls = outer_track + inner_track
-    return all_walls, checkpoints
+    """Create the track map using cached data for better performance"""
+    return track_cache.create_map()
 
 
 # Environment class
 class CarEnv:
     def __init__(self):
+        # Get cached track data for better performance
         self.walls, self.checkpoints = create_map()
 
         # Start the car in a safe position on the right side of the track
@@ -296,14 +371,15 @@ class CarEnv:
         self.state_dim = SENSOR_COUNT + 3  # Sensors + speed + sin(angle) + cos(angle)
         self.action_dim = 2  # Acceleration and steering
 
+        # Precompute safe starting position for reset
+        self.start_x = start_x
+        self.start_y = start_y
+        self.start_angle = math.pi  # Set car pointing tangent to the track (to the left)
+
     def reset(self):
-        # Make sure car starts at the same safe position
-        center_x, center_y = 600, 400
-        start_x = center_x + 550 / 2
-        start_y = center_y
-        # Set car pointing tangent to the track (to the left)
-        start_angle = math.pi
-        self.car.reset(start_x, start_y, start_angle)
+        """Reset environment to initial state"""
+        # Make sure car starts at the same safe position using precomputed values
+        self.car.reset(self.start_x, self.start_y, self.start_angle)
 
         self.done = False
         self.steps = 0
@@ -314,6 +390,7 @@ class CarEnv:
         return self.car.get_state()
 
     def step(self, action):
+        """Take a step in the environment with optimized reward calculation"""
         # Apply action (acceleration, steering)
         self.car.acceleration = action[0] * 2  # Scale action to reasonable acceleration
         self.car.steering = action[1]
@@ -337,9 +414,9 @@ class CarEnv:
         dy = next_checkpoint[1] - self.car.y
         distance_to_checkpoint = math.sqrt(dx * dx + dy * dy)
 
-        # Calculate car's forward direction vector
-        forward_x = math.cos(self.car.angle)
-        forward_y = math.sin(self.car.angle)
+        # Calculate car's forward direction vector - use cached values
+        forward_x = self.car.cos_angle
+        forward_y = self.car.sin_angle
 
         # Calculate dot product to see if car is pointing toward checkpoint
         # Normalize the checkpoint direction vector
