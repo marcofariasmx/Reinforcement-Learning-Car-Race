@@ -11,7 +11,7 @@ import torch
 from config import (MAX_SPEED, running, save_queue,
                     USE_MIXED_PRECISION, USE_GPU_FOR_INFERENCE,
                     hw_settings, update_settings_from_args,
-                    print_current_settings)
+                    print_current_settings, NUM_CARS)
 from training import training_thread
 from visualization import combined_rendering_thread, rendering_thread, dashboard_thread
 
@@ -80,6 +80,8 @@ def main():
                         help=f'Save model every N episodes (auto-detected: {hw_settings["save_interval"]})')
     parser.add_argument('--ppo_epochs', type=int, default=None,
                         help=f'Number of PPO epochs per update (auto-detected: {hw_settings["ppo_epochs"]})')
+    parser.add_argument('--num_cars', type=int, default=None,
+                        help=f'Number of car instances to run in parallel (default: {NUM_CARS})')
 
     # Visualization options
     parser.add_argument('--no_gui', action='store_true',

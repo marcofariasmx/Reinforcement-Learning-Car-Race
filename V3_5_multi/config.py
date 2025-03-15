@@ -142,7 +142,7 @@ def detect_hardware_capabilities():
         print(f"Using CPU with {cpu_count} cores")
         # CPU-optimized settings
         return {
-            'batch_size': 512,
+            'batch_size': 2024, #512 originally
             'memory_size': 25000,
             'max_speed': 5.0,
             'learning_rate': 3e-4,
@@ -180,13 +180,17 @@ USE_GPU_FOR_INFERENCE = hw_settings['use_gpu_for_inference']
 USE_ASYNC_SAVE = hw_settings['async_save']
 GPU_INFO = hw_settings['gpu_info']
 
+# Multi-car settings
+NUM_CARS = 10  # Number of car instances to run in parallel
+MIN_CAR_DISTANCE = 2  # Minimum distance between cars when spawning
+
 
 # Method to update settings from command line args
 def update_settings_from_args(args):
     """Update global settings based on command line arguments"""
     global MAX_SPEED, USE_MIXED_PRECISION, USE_GPU_FOR_INFERENCE
     global USE_PIN_MEMORY, USE_ASYNC_SAVE, SAVE_INTERVAL, BATCH_SIZE
-    global PPO_EPOCHS, device
+    global PPO_EPOCHS, device, NUM_CARS
 
     # Only update if explicitly provided
     if args.max_speed is not None:
@@ -204,6 +208,10 @@ def update_settings_from_args(args):
     if args.ppo_epochs is not None:
         PPO_EPOCHS = args.ppo_epochs
         print(f"Using custom PPO epochs: {PPO_EPOCHS}")
+
+    if args.num_cars is not None:
+        NUM_CARS = args.num_cars
+        print(f"Using custom number of cars: {NUM_CARS}")
 
     if args.gpu_inference:
         USE_GPU_FOR_INFERENCE = True
@@ -247,6 +255,7 @@ def print_current_settings():
     print(f"Pin Memory: {USE_PIN_MEMORY}")
     print(f"GPU for Inference: {USE_GPU_FOR_INFERENCE}")
     print(f"Async Save: {USE_ASYNC_SAVE}")
+    print(f"Number of Cars: {NUM_CARS}")
     if GPU_INFO:
         print(f"GPU: {GPU_INFO['name']}, VRAM: {GPU_INFO['vram_gb']:.2f} GB")
     print("===========================\n")
@@ -266,7 +275,7 @@ frame_data = {
 }
 
 # Training parameters
-MAX_EPISODES = 100000  # Total episodes to train for
+MAX_EPISODES = 10000  # Total episodes to train for
 
 # Training metrics for dashboard - updated with all needed fields
 metrics_data = {
@@ -305,7 +314,15 @@ metrics_data = {
     'loss_history': [],  # History of total losses
     'actor_loss_history': [],  # History of actor losses
     'critic_loss_history': [],  # History of critic losses
-    'entropy_loss_history': []  # History of entropy losses
+    'entropy_loss_history': [],  # History of entropy losses
+    'num_cars': NUM_CARS,
+    'active_cars': NUM_CARS,
+    'car_rewards': [0] * NUM_CARS,
+    'car_total_rewards': [0] * NUM_CARS,
+    'car_laps': [0] * NUM_CARS,
+    'main_car_idx': 0,
+    'best_car_idx': 0,
+    'avg_reward_per_car': 0.0
 }
 
 data_lock = threading.Lock()

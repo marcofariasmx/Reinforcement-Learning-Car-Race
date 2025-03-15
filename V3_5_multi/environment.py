@@ -1,5 +1,6 @@
 import math
 import numpy as np
+import random
 from config import MAX_SPEED, SENSOR_COUNT, MAX_SENSOR_DISTANCE
 
 
@@ -22,6 +23,8 @@ class Car:
         self.total_distance = 0
         self.prev_position = (x, y)
         self.crashed = False
+        self.last_progress = 0
+        self.prev_checkpoint_time = 0
 
         # Precompute for optimizations
         self.half_width = self.width / 2
@@ -81,6 +84,8 @@ class Car:
         self.total_distance = 0
         self.prev_position = (x, y)
         self.crashed = False
+        self.last_progress = 0
+        self.prev_checkpoint_time = 0
 
         # Reset cached values
         self.cos_angle = math.cos(self.angle)
@@ -496,3 +501,236 @@ class CarEnv:
         }
 
         return next_state, reward, self.done, info
+
+
+# New class for multi-car environment to be added to environment.py
+class MultiCarEnv:
+    """Environment that manages multiple cars training in parallel"""
+
+    def __init__(self, num_cars=4, min_starting_distance=100):
+        # Create a shared track for all cars
+        self.walls, self.checkpoints = create_map()
+
+        # Determine a safe starting position (same as in the original CarEnv)
+        center_x, center_y = 600, 400
+        start_x = center_x + 550 / 2  # A bit more than halfway from center to outer wall on the right
+        start_y = center_y  # At the horizontal middle
+        start_angle = math.pi  # Set car pointing tangent to the track (to the left)
+
+        # Save starting position for resets
+        self.start_x = start_x
+        self.start_y = start_y
+        self.start_angle = start_angle
+
+        # Initialize cars at exactly the same position
+        self.cars = []
+        self.done_cars = []  # Track which cars have finished their episodes
+        self.rewards = []
+        self.total_rewards = []
+        self.steps = 0
+        self.max_steps = 2000
+        self.num_cars = num_cars
+
+        # Create all cars at the exact same position
+        for i in range(num_cars):
+            # Create car at starting position (all in exactly the same position)
+            car = Car(start_x, start_y)
+            car.angle = start_angle  # Set car heading tangent to the track
+            self.cars.append(car)
+
+            # Initialize tracking data for this car
+            self.rewards.append(0)
+            self.total_rewards.append(0)
+            self.done_cars.append(False)
+
+        # Designate the first car as the "main" car for detailed tracking
+        self.main_car_idx = 0
+
+        # For compatibility with original environment
+        self.state_dim = 8 + 3  # Sensors + speed + sin(angle) + cos(angle)
+        self.action_dim = 2  # Acceleration and steering
+
+    def reset(self):
+        """Reset all cars or just the ones that have finished their episodes"""
+        # Reset global environment state
+        self.steps = 0
+
+        # If all cars are done, reset them all to exactly the same position
+        if all(self.done_cars):
+            for i in range(self.num_cars):
+                # Reset car at the exact same starting position
+                self.cars[i].reset(self.start_x, self.start_y, self.start_angle)
+
+                # Reset tracking data
+                self.rewards[i] = 0
+                self.total_rewards[i] = 0
+                self.done_cars[i] = False
+        else:
+            # Only reset cars that are done
+            for i in range(self.num_cars):
+                if self.done_cars[i]:
+                    # Reset the car to the exact same starting position
+                    self.cars[i].reset(self.start_x, self.start_y, self.start_angle)
+                    self.rewards[i] = 0
+                    self.total_rewards[i] = 0
+                    self.done_cars[i] = False
+
+        # Return states for all cars
+        return [car.get_state() for car in self.cars]
+
+    def step(self, actions):
+        """Take a step for all cars based on their individual actions"""
+        self.steps += 1
+
+        next_states = []
+        rewards = []
+        dones = []
+        infos = []
+
+        # Update each car based on its action
+        for i, car in enumerate(self.cars):
+            # Skip cars that are already done
+            if self.done_cars[i]:
+                # Return placeholder values for done cars
+                next_states.append(car.get_state())
+                rewards.append(0)
+                dones.append(True)
+                infos.append({'laps': car.laps_completed, 'checkpoints': car.checkpoint_idx,
+                              'distance': car.total_distance, 'speed': car.speed, 'steps': self.steps})
+                continue
+
+            # Apply action to this car
+            car.acceleration = actions[i][0] * 2  # Scale action
+            car.steering = actions[i][1]
+
+            # Update car
+            alive = car.update(self.walls)
+
+            # Check for checkpoint progress
+            checkpoint_reached = car.check_checkpoint(self.checkpoints)
+
+            # Calculate reward similar to the original environment
+            # Get the next checkpoint and calculate direction to it
+            next_checkpoint_idx = car.checkpoint_idx
+            next_checkpoint = self.checkpoints[next_checkpoint_idx]
+
+            # Calculate vector from car to next checkpoint
+            dx = next_checkpoint[0] - car.x
+            dy = next_checkpoint[1] - car.y
+            distance_to_checkpoint = math.sqrt(dx * dx + dy * dy)
+
+            # Calculate car's forward direction vector - use cached values
+            forward_x = car.cos_angle
+            forward_y = car.sin_angle
+
+            # Calculate dot product to see if car is pointing toward checkpoint
+            if distance_to_checkpoint > 0:
+                checkpoint_dx = dx / distance_to_checkpoint
+                checkpoint_dy = dy / distance_to_checkpoint
+                direction_alignment = forward_x * checkpoint_dx + forward_y * checkpoint_dy
+            else:
+                direction_alignment = 1  # Prevent division by zero
+
+            # Calculate reward
+            reward = 0.0
+            done = False
+
+            if not alive:
+                # Penalize crashing, scale based on progress
+                progress_factor = min(1.0, car.total_distance / 500)
+                crash_penalty = -5.0 * (1.0 - progress_factor)
+                reward += crash_penalty
+                done = True
+            elif self.steps >= self.max_steps:
+                # Timeout
+                reward += -2.0
+                done = True
+            elif checkpoint_reached:
+                # Reward checkpoint progress
+                checkpoint_reward = 20.0
+                reward += checkpoint_reward
+
+                # Add time bonus
+                time_to_checkpoint = self.steps - car.prev_checkpoint_time if hasattr(car,
+                                                                                      'prev_checkpoint_time') else self.steps
+                car.prev_checkpoint_time = self.steps
+
+                speed_bonus = 10.0 / max(10, time_to_checkpoint) * 10
+                reward += speed_bonus
+
+                # Extra reward for lap completion
+                if car.checkpoint_idx == 0:
+                    reward += 100.0
+            else:
+                # Reward for progress toward checkpoint
+                progress = car.total_distance
+                progress_diff = progress - (car.last_progress if hasattr(car, 'last_progress') else 0)
+                car.last_progress = progress
+
+                if progress_diff > 0:
+                    reward += progress_diff * 0.5 * max(0, direction_alignment)
+
+                if progress_diff < 0.01:
+                    reward -= 0.05
+
+                reward += direction_alignment * 0.05
+
+                # Reward smooth driving
+                smoothness = 1.0 - min(1.0, abs(car.steering) * 2)
+                reward += smoothness * 0.05
+
+                # Reward for approaching checkpoint
+                reward += 0.5 / max(10, distance_to_checkpoint)
+
+            # Store reward
+            self.rewards[i] = reward
+            self.total_rewards[i] = self.total_rewards[i] + reward
+
+            # Mark car as done if crashed or timeout
+            self.done_cars[i] = done
+
+            # Get next state
+            next_state = car.get_state()
+
+            # Return step information
+            next_states.append(next_state)
+            rewards.append(reward)
+            dones.append(done)
+
+            info = {
+                'laps': car.laps_completed,
+                'checkpoints': car.checkpoint_idx,
+                'distance': car.total_distance,
+                'speed': car.speed,
+                'steps': self.steps,
+                'direction_alignment': direction_alignment
+            }
+            infos.append(info)
+
+        # Check if all cars are done
+        all_done = all(self.done_cars)
+
+        return next_states, rewards, dones, infos, all_done
+
+    def get_main_car(self):
+        """Return the main car for visualization focus"""
+        return self.cars[self.main_car_idx]
+
+    def get_main_car_data(self):
+        """Get data for the main car for visualization"""
+        return {
+            'car': self.cars[self.main_car_idx],
+            'reward': self.rewards[self.main_car_idx],
+            'total_reward': self.total_rewards[self.main_car_idx]
+        }
+
+    def get_best_car_index(self):
+        """Return the index of the car with the highest total reward"""
+        if all(reward == 0 for reward in self.total_rewards):
+            return self.main_car_idx
+        return self.total_rewards.index(max(self.total_rewards))
+
+    def set_main_car_to_best(self):
+        """Set the main car to the one with the highest reward"""
+        self.main_car_idx = self.get_best_car_index()
+        return self.main_car_idx
