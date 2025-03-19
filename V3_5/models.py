@@ -294,6 +294,89 @@ class PPOAgent:
         # Clear trajectory
         self.trajectory = []
 
+    def update_old(self):
+        if len(self.memory) < BATCH_SIZE:
+            return 0, 0, 0, 0  # Return losses as zeros when no update happens
+
+        update_start = time.time()
+
+        # Sample from memory
+        minibatch = random.sample(self.memory, BATCH_SIZE)
+        states, actions, old_log_probs, returns, advantages = zip(*minibatch)
+
+        # Convert lists to numpy arrays first, then to tensors (more efficient)
+        states = torch.FloatTensor(np.array(states)).to(device)
+        actions = torch.FloatTensor(np.array(actions)).to(device)
+
+        # Process old_log_probs - ensure they're all scalar floats
+        old_log_probs = torch.FloatTensor(np.array(old_log_probs, dtype=np.float32)).to(device).unsqueeze(1)
+        returns = torch.FloatTensor(np.array(returns, dtype=np.float32)).to(device).unsqueeze(1)
+        advantages = torch.FloatTensor(np.array(advantages, dtype=np.float32)).to(device).unsqueeze(1)
+
+        # Normalize advantages (improves training stability)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        # Track losses
+        total_loss = 0
+        actor_loss_total = 0
+        critic_loss_total = 0
+        entropy_loss_total = 0
+
+        # Calculate adaptive entropy coefficient
+        # Start with higher entropy for exploration, gradually reduce
+        entropy_coef = max(0.01, 0.1 * (0.995 ** self.episode_count))
+
+        # Multiple epochs of PPO update
+        for _ in range(PPO_EPOCHS):
+            # Evaluate actions and calculate ratio
+            log_probs, values, entropy = self.actor_critic.evaluate(states, actions)
+
+            # Calculate ratio (importance sampling)
+            ratios = torch.exp(log_probs - old_log_probs)
+
+            # Calculate surrogate losses
+            surr1 = ratios * advantages
+            surr2 = torch.clamp(ratios, 1 - PPO_EPSILON, 1 + PPO_EPSILON) * advantages
+
+            # Calculate actor and critic losses
+            actor_loss = -torch.min(surr1, surr2).mean()
+            critic_loss = F.mse_loss(values, returns)
+            entropy_loss = -entropy_coef * entropy  # Adaptive entropy coefficient
+
+            # Total loss
+            loss = actor_loss + 0.5 * critic_loss + entropy_loss
+
+            # Update network
+            self.optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), 0.5)
+            self.optimizer.step()
+
+            # Track losses
+            total_loss += loss.item()
+            actor_loss_total += actor_loss.item()
+            critic_loss_total += critic_loss.item()
+            entropy_loss_total += entropy_loss.item()
+
+        # Step the learning rate scheduler
+        self.scheduler.step()
+
+        # Track update time
+        update_time = time.time() - update_start
+        self.update_times.append(update_time)
+
+        # Update metrics
+        with metrics_lock:
+            metrics_data['nn_update_time'] = np.mean(self.update_times)
+
+        # Return average losses
+        return (
+            total_loss / PPO_EPOCHS,
+            actor_loss_total / PPO_EPOCHS,
+            critic_loss_total / PPO_EPOCHS,
+            entropy_loss_total / PPO_EPOCHS
+        )
+
     def update(self):
         """Optimized PPO update using mixed precision and reduced CPU-GPU transfers"""
         # Skip update if not enough data

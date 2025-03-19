@@ -59,7 +59,7 @@ CYAN = (0, 255, 255)
 
 # RL Parameters
 MEMORY_SIZE = 50000
-BATCH_SIZE = 1024
+BATCH_SIZE = 2048
 GAMMA = 0.99
 TAU = 0.005
 POLICY_NOISE = 0.2
@@ -86,7 +86,7 @@ frame_data = {
 }
 
 # Training parameters
-MAX_EPISODES = 10000  # Total episodes to train for
+MAX_EPISODES = 1000000  # Total episodes to train for
 
 # Training metrics for dashboard
 metrics_data = {

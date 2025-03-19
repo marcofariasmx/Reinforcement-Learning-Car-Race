@@ -142,12 +142,12 @@ def detect_hardware_capabilities():
         print(f"Using CPU with {cpu_count} cores")
         # CPU-optimized settings
         return {
-            'batch_size': 512,
-            'memory_size': 25000,
+            'batch_size': 2048, #512,
+            'memory_size': 100000, #25000,
             'max_speed': 5.0,
             'learning_rate': 3e-4,
-            'ppo_epochs': 5,
-            'save_interval': 25,
+            'ppo_epochs': 10, #5,
+            'save_interval': 50, #25,
             'use_mixed_precision': False,
             'use_pin_memory': False,
             'use_gpu_for_inference': False,
